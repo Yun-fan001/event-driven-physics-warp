@@ -1,0 +1,58 @@
+<!-- Stack Block 场景: 吸盘式抓取方块并放置到目标平台 -->
+<mujoco model="stack_block">
+  <compiler angle="degree" coordinate="local" inertiafromgeom="true"/>
+  <option timestep="0.002" gravity="0 0 -9.81" integrator="implicitfast"/>
+
+  <default>
+    <!-- 高摩擦确保吸盘能带起方块 -->
+    <geom friction="1.5 0.005 0.0001" condim="3" rgba="0.7 0.7 0.7 1"/>
+    <joint damping="0.5"/>
+  </default>
+
+  <asset>
+    <texture name="grid" type="2d" builtin="checker" width="512" height="512"
+             rgb1="0.9 0.9 0.9" rgb2="0.6 0.6 0.6"/>
+    <material name="gridmat" texture="grid" texrepeat="8 8" reflectance="0.1"/>
+  </asset>
+
+  <worldbody>
+    <light pos="0 0 2" dir="0 0 -1" diffuse="1 1 1"/>
+    <geom name="floor" type="plane" size="2 2 0.1" material="gridmat"/>
+
+    <!-- 目标放置平台 -->
+    <body name="platform" pos="0.15 0 0.02">
+      <geom name="platform_geom" type="box" size="0.06 0.06 0.02" rgba="0.3 0.3 0.3 1"/>
+    </body>
+
+    <!-- 被抓方块: 初始在 origin -->
+    <body name="block" pos="0 0 0.025">
+      <freejoint name="block_free"/>
+      <geom name="block_geom" type="box" size="0.03 0.03 0.025" mass="0.08" rgba="0.9 0.3 0.2 1"/>
+      <site name="block_top" pos="0 0 0.025" size="0.005"/>
+      <site name="block_center" pos="0 0 0" size="0.005"/>
+    </body>
+
+    <!-- Gripper (吸盘): 可 x/z 两自由度移动 -->
+    <body name="gripper_base" pos="0 0 0.0">
+      <joint name="gripper_x" type="slide" axis="1 0 0" limited="true" range="-0.05 0.20" damping="2.0"/>
+      <body name="gripper" pos="0 0 0.15">
+        <joint name="gripper_z" type="slide" axis="0 0 1" limited="true" range="0.04 0.20" damping="3.0"/>
+        <geom name="gripper_geom" type="cylinder" size="0.035 0.008" mass="0.3" rgba="0.2 0.4 0.9 1"/>
+        <site name="gripper_tip" pos="0 0 -0.008" size="0.005"/>
+      </body>
+    </body>
+
+    <camera name="side_cam" pos="0.4 0 0.15" xyaxes="0 1 0 -0.3 0 1" fovy="45"/>
+  </worldbody>
+
+  <actuator>
+    <position name="gripper_x_pos" joint="gripper_x" kp="2000" kv="200" ctrlrange="-0.05 0.20"/>
+    <position name="gripper_z_pos" joint="gripper_z" kp="2000" kv="200" ctrlrange="0.04 0.20"/>
+  </actuator>
+
+  <sensor>
+    <framepos name="block_pos" objtype="site" objname="block_center"/>
+    <framelinvel name="block_vel" objtype="site" objname="block_center"/>
+    <force name="gripper_force" site="gripper_tip"/>
+  </sensor>
+</mujoco>

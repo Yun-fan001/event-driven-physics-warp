@@ -1,0 +1,52 @@
+<!--物理场景参数-->
+
+<mujoco model="stick_slip">
+  <compiler angle="degree" coordinate="local" inertiafromgeom="true"/>
+  <option timestep="0.002" gravity="0 0 -9.81" integrator="implicitfast"/>
+  <!--0.002：小则慢＋稳，大则快＋抖-->
+
+  <default>
+    <geom friction="0.9 0.005 0.0001" condim="3" rgba="0.7 0.7 0.7 1"/>
+    <joint damping="0.05"/>
+  </default>
+
+  <asset>
+    <texture name="grid" type="2d" builtin="checker" width="512" height="512"
+             rgb1="0.9 0.9 0.9" rgb2="0.6 0.6 0.6"/>
+    <material name="gridmat" texture="grid" texrepeat="8 8" reflectance="0.1"/>
+  </asset>
+
+  <worldbody>
+    <light pos="0 0 2" dir="0 0 -1" diffuse="1 1 1"/>
+    <geom name="floor" type="plane" size="2 2 0.1" material="gridmat"/>
+
+    <body name="slider" pos="0 0 0.05">
+    <!-- 滑块初始位置 -->
+      <freejoint name="slider_free"/>
+      <geom name="block" type="box" size="0.05 0.05 0.05" mass="1.0" rgba="0.2 0.4 0.9 1"/>
+      <site name="block_center" pos="0 0 0" size="0.005"/>
+    </body>
+
+    <body name="pusher" pos="-0.12 0 0.05">
+    <!-- 推杆初始位置 -0.12（物块左侧）；range 限制推杆行程 -->
+      <joint name="pusher_x" type="slide" axis="1 0 0" limited="true" range="-0.05 0.35" damping="1.0"/>
+      <geom name="pusher_geom" type="box" size="0.02 0.04 0.04" rgba="0.9 0.3 0.2 1"/>
+      <site name="pusher_tip" pos="0.02 0 0" size="0.005"/>
+    </body>
+   
+    <camera name="side_cam" pos="0.8 0 0.35" xyaxes="0 1 0 -0.3 0 1" fovy="45"/>
+     <!-- 相机位置；fovy 是视野角；改 pos 可换观察角度 -->
+  </worldbody>
+
+  <actuator>
+  <!-- 分别输出：位置、速度、接触力 -->
+  <!-- 名字对应代码里 self.model.sensor("xxx")，改名则代码也要改 -->
+    <position name="pusher_pos" joint="pusher_x" kp="500" kv="50" ctrlrange="-0.05 0.35"/>
+  </actuator>
+
+  <sensor>
+    <framepos name="block_pos" objtype="site" objname="block_center"/>
+    <framelinvel name="block_vel" objtype="site" objname="block_center"/>
+    <force name="pusher_force" site="pusher_tip"/>
+  </sensor>
+</mujoco>

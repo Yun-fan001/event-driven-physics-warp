@@ -1,0 +1,49 @@
+<!-- Peg-in-Hole 场景: 圆柱垂直插入带孔平台，监测 Contact/NoContact -->
+<mujoco model="peg_in_hole">
+  <compiler angle="degree" coordinate="local" inertiafromgeom="true"/>
+  <option timestep="0.002" gravity="0 0 -9.81" integrator="implicitfast"/>
+
+  <default>
+    <geom friction="0.6 0.005 0.0001" condim="3" rgba="0.7 0.7 0.7 1"/>
+    <joint damping="0.5"/>
+  </default>
+
+  <asset>
+    <texture name="grid" type="2d" builtin="checker" width="512" height="512"
+             rgb1="0.9 0.9 0.9" rgb2="0.6 0.6 0.6"/>
+    <material name="gridmat" texture="grid" texrepeat="8 8" reflectance="0.1"/>
+  </asset>
+
+  <worldbody>
+    <light pos="0 0 2" dir="0 0 -1" diffuse="1 1 1"/>
+    <geom name="floor" type="plane" size="2 2 0.1" material="gridmat"/>
+
+    <!-- Socket: 底部 + 四壁围成方孔 -->
+    <body name="socket" pos="0 0 0.0">
+      <geom name="socket_bottom" type="box" size="0.06 0.06 0.005" pos="0 0 0.005" rgba="0.4 0.4 0.4 1"/>
+      <geom name="wall_n" type="box" size="0.06 0.005 0.04" pos="0 0.065 0.045" rgba="0.5 0.5 0.5 1"/>
+      <geom name="wall_s" type="box" size="0.06 0.005 0.04" pos="0 -0.065 0.045" rgba="0.5 0.5 0.5 1"/>
+      <geom name="wall_e" type="box" size="0.005 0.06 0.04" pos="0.065 0 0.045" rgba="0.5 0.5 0.5 1"/>
+      <geom name="wall_w" type="box" size="0.005 0.06 0.04" pos="-0.065 0 0.045" rgba="0.5 0.5 0.5 1"/>
+    </body>
+
+    <!-- Peg: 圆柱，直接由 z 轴 slide 控制，模拟末端执行器 -->
+    <body name="peg" pos="0 0 0.15">
+      <joint name="peg_z" type="slide" axis="0 0 1" limited="true" range="0.02 0.2" damping="1.0"/>
+      <geom name="peg_geom" type="cylinder" size="0.025 0.05" mass="0.5" rgba="0.9 0.3 0.2 1"/>
+      <site name="peg_tip" pos="0 0 -0.05" size="0.005"/>
+    </body>
+
+    <camera name="side_cam" pos="0.5 0 0.1" xyaxes="0 1 0 -0.3 0 1" fovy="45"/>
+  </worldbody>
+
+  <actuator>
+    <position name="peg_pos" joint="peg_z" kp="2000" kv="200" ctrlrange="0.02 0.2"/>
+  </actuator>
+
+  <sensor>
+    <framepos name="peg_pos" objtype="site" objname="peg_tip"/>
+    <framelinvel name="peg_vel" objtype="site" objname="peg_tip"/>
+    <force name="peg_force" site="peg_tip"/>
+  </sensor>
+</mujoco>
