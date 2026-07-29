@@ -1,0 +1,641 @@
+============================================================
+真实机器人适配指南
+Real Robot Adaptation Guide
+============================================================
+版本: 1.0  |  最后更新: 2026-07-29
+用途: 从仿真(Step 1-3)迁移到真实机器人(Step 5)时，
+      根据实际硬件修改代码的参考手册。
+============================================================
+
+
+============================================================
+一、总体架构说明
+============================================================
+
+仿真代码的核心「数据流」是:
+  MuJoCo环境 → 采集循环 → .npz文件 → Dataset加载 → 模型训练/推理
+
+真实机器人的数据流替换为:
+  ROS Topic订阅 → 采集循环(时间对齐) → .npz文件 → Dataset加载 → 模型推理
+                        ↓
+              (可选的rosbag记录)
+
+需要替换/新建的核心文件:
+  [新建] real_robot_collector.py   ← 真实数据采集主脚本
+  [新建] ros_sensor_bridge.py      ← ROS传感器接口封装
+  [新建] launch/collect.launch     ← ROS launch 文件(可选)
+  [适配] dataset.py                ← 如果数据格式有变化
+  [不变] models/                   ← 模型架构不变
+  [不变] train_step2.py            ← 训练脚本不变(加载.npz)
+  [不变] run_experiments_step3.py  ← 实验脚本不变
+
+
+============================================================
+二、摄像头适配 (Camera)
+============================================================
+
+需要确认的信息:
+  - 相机型号 (如 Intel RealSense D435i / ZED 2 / 普通USB相机)
+  - ROS topic 名称 (如 /camera/color/image_raw)
+  - 分辨率 (如 640×480 或 1280×720)
+  - 帧率 (如 30Hz)
+  - 图像编码 (如 bgr8 / rgb8 / mono8)
+  - 是否自带深度图
+
+======== 2.1 ROS 消息类型与订阅代码模板 ========
+
+常见的 ROS 图像 topic 类型:
+  sensor_msgs/Image          ← 标准RGB/深度图像
+  sensor_msgs/CompressedImage ← JPEG/PNG压缩图像
+
+基础订阅代码 (ros_sensor_bridge.py 中):
+
+```python
+import rospy
+from sensor_msgs.msg import Image
+from cv_bridge import CvBridge
+import numpy as np
+
+class CameraSubscriber:
+    def __init__(self, topic: str, encoding: str = "bgr8"):
+        self.bridge = CvBridge()
+        self.latest_frame = None
+        self.latest_timestamp = None
+        self.sub = rospy.Subscriber(
+            topic, Image, self._callback, queue_size=10
+        )
+        self.encoding = encoding  # bgr8 / rgb8 / mono8
+
+    def _callback(self, msg: Image):
+        self.latest_timestamp = msg.header.stamp.to_sec()
+        # CV bridge 转换为 numpy (H, W, C) uint8
+        cv_image = self.bridge.imgmsg_to_cv2(msg, desired_encoding=self.encoding)
+        self.latest_frame = np.array(cv_image)
+
+    def get_frame(self):
+        return self.latest_frame, self.latest_timestamp
+```
+
+======== 2.2 不同相机型号的适配项 ========
+
+| 相机型号                   | 默认topic                     | 分辨率    | encoding | 特殊注意事项
+|---------------------------|------------------------------|-----------|----------|-------------
+| Intel RealSense D435i     | /camera/color/image_raw      | 640×480   | rgb8     | 有IMU可辅助时间戳；需安装realsense2_camera
+| Intel RealSense D415      | /camera/color/image_raw      | 1280×720  | rgb8     | 卷帘快门，快速运动有拖影
+| ZED 2                     | /zed2/zed_node/rgb/image_rect_color | 1280×720 | bgra8 | 自带CUDA加速；需安装zed-ros-wrapper
+| 普通USB相机(usb_cam)       | /usb_cam/image_raw           | 640×480   | bgr8     | 最简单；帧率不稳定需软件触发或硬件触发
+| 高速工业相机(FLIR等)        | 取决于驱动                    | 自定义     | mono8/bayer | 可能需要SpinView/Spinnaker SDK
+
+======== 2.3 图像预处理适配 ========
+
+当前仿真代码中的视觉预处理 (dataset.py):
+  - 仿真渲染输出: uint8 (H,W,3), 128×128
+  - 预处理: /255.0 → float32 [0,1] → transpose (T,C,H,W)
+
+真实相机的额外预处理 (在 ros_sensor_bridge.py 或 dataset.py 中):
+  1) 缩放: 如果相机分辨率≠128×128，需缩放到128×128
+     → cv2.resize(frame, (128, 128))
+  2) 颜色通道: 如果 encoding 是 bgr8，需转为 rgb
+     → cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+  3) 裁剪: 如果需要关注特定区域 (Region of Interest)
+     → frame = frame[y1:y2, x1:x2]
+  4) 去畸变: 如果相机有明显畸变且影响接触检测
+     → cv2.undistort(frame, K, dist_coeffs)
+
+修改位置: ros_sensor_bridge.py 的 CameraSubscriber 中，或
+         在采集循环中调用预处理函数。
+
+======== 2.4 相机标定参数记录 ========
+
+需要从相机厂商/标定工具获取并在代码中记录的参数:
+  - 内参矩阵 K (3×3)
+  - 畸变系数 dist_coeffs (5或8个值)
+  - 相机相对于机械臂基座的位姿 (外参 T_cam_base)
+  → 记录在 params_record.md 或新建 calib_params.yaml
+
+
+============================================================
+三、机械臂适配 (Robot Arm)
+============================================================
+
+需要确认的信息:
+  - 机械臂品牌/型号 (如 Franka Emika Panda / KUKA iiwa / UR5 / 自定义)
+  - ROS 驱动包名称 (如 franka_ros / iiwa_stack / ur_robot_driver)
+  - 是否有力觉传感器(末端)？与机械臂的控制接口是什么？
+  - 控制模式: 位置控制 / 速度控制 / 力矩控制 / 阻抗控制
+  - 通信频率 (如 100Hz / 500Hz / 1000Hz)
+
+======== 3.1 关节状态订阅 (本体感知数据源) ========
+
+ROS topic: 通常是 /joint_states
+消息类型: sensor_msgs/JointState
+
+```python
+from sensor_msgs.msg import JointState
+
+class JointStateSubscriber:
+    def __init__(self, topic: str = "/joint_states"):
+        self.latest_positions = None
+        self.latest_velocities = None
+        self.latest_timestamp = None
+        self.sub = rospy.Subscriber(
+            topic, JointState, self._callback, queue_size=10
+        )
+
+    def _callback(self, msg: JointState):
+        self.latest_timestamp = msg.header.stamp.to_sec()
+        self.latest_positions = np.array(msg.position)
+        self.latest_velocities = np.array(msg.velocity) if msg.velocity else None
+
+    def get_state(self):
+        return self.latest_positions, self.latest_velocities, self.latest_timestamp
+```
+
+======== 3.2 末端执行器(EE)位姿获取 ========
+
+某些机械臂直接发布 EE 位姿 topic:
+  ROS topic: /cartesian_pose (Franka) 或通过 TF 查询
+  消息类型: geometry_msgs/PoseStamped 或 tf2_msgs/TFMessage
+
+如果使用 TF 查询 (ros_sensor_bridge.py):
+```python
+import tf2_ros
+import tf2_geometry_msgs
+
+class EEPoseListener:
+    def __init__(self, base_frame: str = "world", ee_frame: str = "panda_link8"):
+        self.tf_buffer = tf2_ros.Buffer()
+        self.tf_listener = tf2_ros.TransformListener(self.tf_buffer)
+        self.base_frame = base_frame
+        self.ee_frame = ee_frame
+
+    def get_ee_pose(self):
+        try:
+            transform = self.tf_buffer.lookup_transform(
+                self.base_frame, self.ee_frame, rospy.Time(0), rospy.Duration(0.1)
+            )
+            pos = transform.transform.translation
+            rot = transform.transform.rotation
+            return np.array([pos.x, pos.y, pos.z]), np.array([rot.x, rot.y, rot.z, rot.w])
+        except Exception:
+            return None, None
+```
+
+======== 3.3 机械臂控制 (采集数据时需要) ========
+
+仿真中: env.step(action) → MuJoCo 物理步进
+真实中: 发布控制指令到对应 ROS topic/action
+
+常见的控制方式:
+
+A) 位置控制 (最常用):
+   ROS topic: /equilibrium_pose (Franka) 或 /scaled_pos_joint_traj_controller/command
+   消息类型: geometry_msgs/PoseStamped 或 trajectory_msgs/JointTrajectory
+
+B) 速度控制:
+   ROS topic: /joint_group_vel_controller/command
+   消息类型: std_msgs/Float64MultiArray
+
+C) 力矩控制 (接触丰富任务推荐):
+   ROS topic: /joint_torque_controller/command (Franka)
+   消息类型: std_msgs/Float64MultiArray
+   需要实时内核 + 高频控制回路
+
+修改位置: real_robot_collector.py 的 action→control 映射部分
+同步修改: 采集脚本中对应任务的运动轨迹生成逻辑
+
+======== 3.4 机械臂接口封装模板 ========
+
+```python
+class RobotController:
+    """机械臂统一控制接口"""
+    def __init__(self, control_mode: str = "position"):
+        # 根据 control_mode 初始化对应的 ROS publisher
+        if control_mode == "position":
+            self.cmd_pub = rospy.Publisher(
+                "/equilibrium_pose", PoseStamped, queue_size=10
+            )
+        elif control_mode == "velocity":
+            self.cmd_pub = rospy.Publisher(
+                "/joint_vel_cmd", Float64MultiArray, queue_size=10
+            )
+        # ... 其他模式
+
+    def send_command(self, cmd: np.ndarray):
+        """发送控制指令 (具体消息构造由子类/配置决定)"""
+        # 构造 ROS 消息
+        # self.cmd_pub.publish(msg)
+        pass
+
+    def get_robot_state(self):
+        """获取当前关节位置/速度 + EE 位姿"""
+        pass
+```
+
+不同机械臂品牌的 ROS 驱动:
+
+| 品牌            | ROS驱动包            | 控制topic (位置)                          | 本体感知topic          | 力觉topic
+|----------------|---------------------|-----------------------------------------|----------------------|-----------
+| Franka Panda   | franka_ros          | /franka_ros/joint_position_controller   | /joint_states        | /franka_state_controller/F_ext
+| KUKA iiwa      | iiwa_stack          | /iiwa/PositionJointInterface_trajectory  | /joint_states        | /iiwa/state/CartesianWrench
+| UR5/UR10       | ur_robot_driver     | /scaled_pos_joint_traj_controller/cmd   | /joint_states        | /wrench (需UR+或外置传感器)
+| Universal      | universal_robot     | (同上)                                   | (同上)                | (同上)
+
+
+============================================================
+四、力/力矩传感器适配 (Force/Torque Sensor)
+============================================================
+
+需要确认的信息:
+  - 传感器品牌/型号 (如 ATI Mini45 / Robotiq FT-300 / Weiss KMS40)
+  - ROS topic 名称
+  - 消息类型 (geometry_msgs/WrenchStamped 或自定义)
+  - 频率 (如 100Hz / 500Hz / 1000Hz)
+  - 安装位置: 腕部(腕力传感器)还是指尖
+  - 是否有热漂移/零漂问题需要进行软件补偿？
+
+======== 4.1 标准力传感器订阅 ========
+
+常见 topic: /ft_sensor/wrench 或 /wrench
+消息类型: geometry_msgs/WrenchStamped
+
+```python
+from geometry_msgs.msg import WrenchStamped
+
+class ForceSensorSubscriber:
+    def __init__(self, topic: str = "/ft_sensor/wrench"):
+        self.latest_force = None
+        self.latest_torque = None
+        self.latest_timestamp = None
+        self.sub = rospy.Subscriber(
+            topic, WrenchStamped, self._callback, queue_size=10
+        )
+
+    def _callback(self, msg: WrenchStamped):
+        self.latest_timestamp = msg.header.stamp.to_sec()
+        self.latest_force = np.array([
+            msg.wrench.force.x,
+            msg.wrench.force.y,
+            msg.wrench.force.z,
+        ])
+        self.latest_torque = np.array([
+            msg.wrench.torque.x,
+            msg.wrench.torque.y,
+            msg.wrench.torque.z,
+        ])
+
+    def get_force(self):
+        return self.latest_force, self.latest_timestamp
+```
+
+======== 4.2 不同力传感器型号的适配项 ========
+
+| 传感器型号              | ROS topic(典型)         | 消息类型            | 阻抗/驱动包              | 频率    | 力范围
+|-----------------------|------------------------|--------------------|------------------------|--------|--------
+| ATI Mini45            | /netft_data            | WrenchStamped       | netft_rdt_driver       | 100-7000Hz | ±145N
+| ATI Nano17            | /netft_data            | WrenchStamped       | netft_rdt_driver       | 100-7000Hz | ±25N
+| Robotiq FT-300        | /robotiq_ft_wrench     | WrenchStamped       | robotiq_ft_sensor      | 100Hz  | ±300N
+| Weiss KMS40           | /weiss_kms40/wrench    | WrenchStamped       | (厂商ROS驱动)            | 1000Hz | ±200N
+| Franka 内置力估计      | /franka_state_controller/F_ext | WrenchStamped | franka_ros             | 1000Hz | 估计值
+| OptoForce             | /optoforce/wrench      | WrenchStamped       | optoforce_ros          | 100-1000Hz | 型号依赖
+
+======== 4.3 力传感器标定与偏移补偿 ========
+
+真实传感器常见问题:
+  1) 零漂 (Zero Drift): 无接触时读数非零，随时间/温度漂移
+     → 采集前记录若干帧无接触数据，计算均值偏移 bias，每帧减去
+  2) 重力补偿: 末端工具本身有重量，传感器包含工具重力分量
+     → 需要知道工具质量+质心+EE姿态，去除重力投影
+  3) 惯性补偿: 加减速时传感器会测到惯性力 F=ma
+     → 需要从加速度估计中减去
+
+偏移补偿伪代码 (ros_sensor_bridge.py):
+```python
+def calibrate_zero(self, num_samples=100):
+    """采集无接触状态下的力读数作为零偏"""
+    samples = []
+    for _ in range(num_samples):
+        f, _ = self.get_force()
+        if f is not None:
+            samples.append(f)
+        rospy.sleep(0.01)
+    self.force_bias = np.mean(samples, axis=0) if samples else np.zeros(3)
+    print(f"力传感器零偏: {self.force_bias}")
+
+def get_compensated_force(self):
+    raw_force, ts = self.get_force()
+    if raw_force is not None and self.force_bias is not None:
+        return raw_force - self.force_bias, ts
+    return raw_force, ts
+```
+
+======== 4.4 力阈值与仿真对齐 ========
+
+仿真中的接触力阈值:
+  - Stick-Slip: contact_force_threshold = 0.5N
+  - Peg-in-Hole: contact_force_threshold = 1.0N
+  - Stack-Block: grip_force_threshold = 2.0N
+
+真实机器人的阈值需要根据实际传感器噪声水平重新标定。
+建议:
+  1) 采集1-2条无接触轨迹，记录力噪声的 RMS
+  2) 接触阈值设为 3×RMS_noise (3-sigma原则)
+  3) 在 real_robot_collector.py 中增加阈值配置参数
+
+
+============================================================
+五、多模态时间戳对齐 (Timing Synchronization)
+============================================================
+
+这是从仿真迁移到真实机器人的「最关键」技术点。
+仿真中所有模态共用同一时间步，真实系统中各传感器独立运行。
+
+======== 5.1 各传感器典型频率 ========
+
+| 传感器类型     | 典型频率      | ROS时间戳来源
+|--------------|-------------|--------------
+| 相机          | 30Hz        | image.header.stamp
+| 力传感器      | 100-1000Hz  | wrench.header.stamp
+| 关节状态      | 100-500Hz   | joint_state.header.stamp
+| EE位姿        | 100-1000Hz  | pose.header.stamp
+
+======== 5.2 时间对齐策略 (3种) ========
+
+策略A: 最高频传感器为基准 (推荐)
+  以力传感器(如500Hz)的时间戳为基准，其他模态取最近的可用帧。
+  优点: 不丢力觉信息（事件检测的核心模态）
+  缺点: 视觉帧会被重复使用多帧
+
+策略B: 最低频传感器为基准
+  以相机(30Hz)时间戳为基准，力觉/本体在时间窗内做均值。
+  优点: 每个样本有独立视觉帧，数据量小
+  缺点: 损失力的高频动态信息（对Slip检测致命）
+
+策略C: 统一重采样到固定频率 (论文中建议)
+  选择一个目标频率(如100Hz)，所有模态重采样到该频率。
+  视觉用最近邻，力觉用均值/最近邻。
+  优点: 数据格式规整，与仿真 .npz 结构一致
+
+======== 5.3 时间对齐实现代码模板 ========
+
+在 ros_sensor_bridge.py 中:
+
+```python
+class SynchronizedRecorder:
+    def __init__(self, target_hz: float = 100.0):
+        self.dt = 1.0 / target_hz
+        self.camera = CameraSubscriber(...)
+        self.force_sensor = ForceSensorSubscriber(...)
+        self.joint_state = JointStateSubscriber(...)
+        # 缓冲区: 保存最近 N 帧用于回溯匹配
+        self.force_buffer = []      # (timestamp, force)
+        self.vision_buffer = []     # (timestamp, frame)
+        self.proprio_buffer = []    # (timestamp, joint_pos)
+
+    def get_aligned_sample(self, target_timestamp: float):
+        """在 target_timestamp 时刻获取各模态对齐数据"""
+        # 力: 取最近帧
+        force = self._get_nearest(self.force_buffer, target_timestamp)
+        # 视觉: 取最近帧
+        vision = self._get_nearest(self.vision_buffer, target_timestamp)
+        # 本体: 取最近帧
+        proprio = self._get_nearest(self.proprio_buffer, target_timestamp)
+        return vision, force, proprio
+
+    @staticmethod
+    def _get_nearest(buffer, target_ts):
+        """缓冲区中查找时间戳最接近的帧"""
+        if not buffer:
+            return None
+        idx = min(range(len(buffer)),
+                   key=lambda i: abs(buffer[i][0] - target_ts))
+        return buffer[idx][1]
+```
+
+======== 5.4 时间偏移诊断工具 ========
+
+在采集前应验证各传感器时间戳偏差:
+
+```python
+def diagnose_timing(camera_ts, force_ts, joint_ts):
+    """诊断各模态之间的时间偏移"""
+    # 1. 检查各传感器时间戳是否单调递增
+    # 2. 计算两两之间的平均延迟
+    # 3. 打印报告
+    print(f"相机范围: {camera_ts[0]:.3f} ~ {camera_ts[-1]:.3f}, {len(camera_ts)}帧")
+    print(f"力觉范围: {force_ts[0]:.3f} ~ {force_ts[-1]:.3f}, {len(force_ts)}帧")
+    print(f"关节范围: {joint_ts[0]:.3f} ~ {joint_ts[-1]:.3f}, {len(joint_ts)}帧")
+    # 检查是否有倒流(时间戳倒退)
+    # 检查是否有跳跃(相邻帧间隔 > 5×期望间隔)
+```
+
+======== 5.5 硬件触发(高级方案) ========
+
+如果有条件，用硬件信号同时触发相机曝光和传感器采样:
+  - GPIO 触发: 力传感器采样时发出脉冲触发相机
+  - PTP (Precision Time Protocol): IEEE 1588 网络时间同步
+  - 外部时钟源: 如 NTP 服务器同步所有ROS节点
+
+如使用硬件触发，时间对齐代码可简化为直接按索引配对。
+
+
+============================================================
+六、数据采集流程改造
+============================================================
+
+仿真采集流程 (collect_data_step2.py):
+  1) env.reset() → 初始状态
+  2) while not done:
+       action = 策略(如恒定速度)
+       obs, reward, done, info = env.step(action)
+       记录 frames, forces, velocities, gt_states
+  3) 保存为 .npz
+
+真实采集流程 (real_robot_collector.py 新建):
+  1) 初始化 ROS 节点 + 传感器订阅器
+  2) 机械臂移动到初始位置
+  3) 力传感器零偏标定
+  4) 启动控制循环，开始记录
+  5) while not done:
+       发布控制指令(位置/速度/力矩)
+       等待传感器回调填充缓冲区
+       按时间对齐策略提取 aligned_sample
+       记录 frames, forces, velocities, proprio
+       (注意: 真实中没有 gt_states！手动标注或事后标注)
+  6) 机械臂回到安全位置
+  7) 保存为 .npz (格式与仿真一致)
+
+======== 6.1 真实数据 .npz 格式 (建议) ========
+
+保持与仿真 .npz 兼容，方便 Dataset 直接加载:
+
+```python
+save_dict = {
+    "frames": np.stack(frames).astype(np.uint8),        # (T, H, W, 3)
+    "forces": np.stack(forces).astype(np.float32),      # (T, 3)
+    "velocities": np.stack(velocities).astype(np.float32), # (T, 3)  关节/EE速度
+    "contact_states_gt": np_gt_states,                  # (T,)  手动标注
+    "contact_states_auto": pred_states,                 # (T,)  自动标注(同仿真)
+    "seed": seed,
+    "friction_scale": 1.0,      # 真实中无此概念，填1.0
+}
+# 任务特有字段:
+# Stick-Slip: "pusher_x" (端部位置)
+# Peg-in-Hole: "peg_z"
+# Stack-Block: "gripper_x", "gripper_z", "block_pos"
+```
+
+======== 6.2 手动标注流程 (替代仿真 GT) ========
+
+真实机器人没有 MuJoCo 自动提供的 Ground Truth。
+事件标签来源:
+  方案A: 采集时用手持按钮/键盘标记事件时刻 (最准确)
+  方案B: 用仿真中验证过的 event_annotation_v2.py 对真实数据做自动标注
+         (前提: 力阈值已对真实传感器重新标定)
+  方案C: 事后逐帧观看视频回放标注 (最耗时但最可靠)
+
+推荐: 方案B + 方案C 抽检验证
+  → 先用自动标注，再人工检查 10% 数据确认精度
+
+
+============================================================
+七、不同任务对应的真实机器人硬件需求
+============================================================
+
+======== Task 1: Stick-Slip (水平拉动物块) ========
+硬件需求:
+  - 机械臂: 末端安装推杆/推板，或直接用夹爪推
+  - 力传感器: 腕部力传感器(测水平推力和法向力)
+  - 相机: 侧视角，能看到物块和推杆接触区
+  - 被操作物: 物块(木质/金属/塑料)，置于不同粗糙面上
+
+运动轨迹: 水平匀速推进 (与仿真一致)，改变速度/推力做多样本
+
+======== Task 2: Peg-in-Hole (插入圆柱) ========
+硬件需求:
+  - 机械臂: 末端夹持圆柱销
+  - 力传感器: 腕部力传感器(测轴向插入力和侧向力)
+  - 相机: 俯视/侧视
+  - 被操作物: 圆柱销 + 带孔平台
+
+运动轨迹: 垂直向下插入 (与仿真一致)，可改变对准偏差
+
+======== Task 3: Stack-Block (叠放方块) ========
+硬件需求:
+  - 机械臂: 带夹爪或吸盘
+  - 力传感器: 腕部力传感器
+  - 相机: 能观测方块和放置平台
+  - 被操作物: 方块 + 放置平台
+
+运动轨迹: 下降→夹取→提升→平移→放置→释放 (与仿真状态机一致)
+
+
+============================================================
+八、新增代码文件清单 (Step 5 需要创建)
+============================================================
+
+| 文件名                         | 说明                                      | 优先级
+|-------------------------------|------------------------------------------|--------
+| real_robot_collector.py       | 真实数据采集主脚本 (替代 collect_data_step2.py) | 必须
+| ros_sensor_bridge.py          | ROS传感器接口封装 (相机/力/关节)             | 必须
+| launch/collect_stick_slip.launch  | Task 1 ROS launch 文件                   | 可选
+| launch/collect_peg_in_hole.launch | Task 2 ROS launch 文件                   | 可选
+| launch/collect_stack_block.launch | Task 3 ROS launch 文件                   | 可选
+| force_calib.py                | 力传感器零偏标定工具                        | 推荐
+| check_ros_env.py              | ROS环境检查脚本                             | 推荐
+
+已有文件修改点:
+  - dataset.py: 无需修改 (如果 .npz 格式兼容)
+  - requirements.txt: 添加 rospy, cv_bridge, tf2_ros 等 ROS 依赖
+  - params_record.md: 添加真实传感器参数记录
+
+不变的文件:
+  - models/ (全部): 模型架构与硬件无关
+  - train_step2.py: 训练脚本与硬件无关
+  - run_experiments_step3.py: 实验脚本与硬件无关
+  - visualize_step2.py: 可视化与硬件无关 (加载 .npz)
+  - plot_results_step3.py: 绘图与硬件无关
+
+
+============================================================
+九、适配检查清单 (实机实验前逐项确认)
+============================================================
+
+□ 1. 机械臂ROS驱动已安装并能正常通信
+     → 运行: rostopic list | grep joint_states
+     → 运行: rostopic echo /joint_states -n1
+
+□ 2. 力传感器ROS驱动已安装并能正常读数
+     → 运行: rostopic echo /ft_sensor/wrench -n1
+     → 用手按压传感器，观察读数是否变化
+
+□ 3. 相机ROS驱动已安装并能正常出图
+     → 运行: rosrun image_view image_view image:=/camera/color/image_raw
+
+□ 4. 时间戳对齐已测试
+     → 同时记录 camera.header.stamp 和 wrench.header.stamp
+     → 确认两者使用同一时钟源 (通常是 /clock 或系统时间)
+
+□ 5. 力传感器零偏已标定
+     → 无接触时读数 < 0.5N (3σ)
+     → 如零漂严重，采集后做后处理去偏
+
+□ 6. 控制频率和传感器频率匹配
+     → 控制循环频率 > 传感器最低频率
+     → 例: 相机30Hz，控制回路至少50Hz避免丢帧
+
+□ 7. 紧急停止机制已测试
+     → 机械臂急停按钮正常工作
+     → 软件急停 (最大力阈值/最大速度限位) 已设置
+
+□ 8. 采集1条测试轨迹
+     → 运行 real_robot_collector.py 采集1条完整轨迹
+     → 用 visualize_step2.py 可视化力/速度/相机帧
+     → 确认数据格式与仿真 .npz 兼容
+
+□ 9. 自动标注精度验证
+     → 对真实数据运行 event_annotation_v2.py
+     → 人工检查事件标记是否合理
+
+□ 10. 仿真模型在真实数据上 Zero-Shot 测试
+      → 加载仿真训练的 checkpoint
+      → 在真实数据上推理并计算 F1-score
+      → 记录 Sim-to-Real Gap
+
+
+============================================================
+十、常见故障排查
+============================================================
+
+Q: rosbag 录制后发现时间戳全为0？
+A: 检查 ros::Time 是否初始化: rospy.Time.now() vs rospy.Time(0)
+   使用 sim_time 参数时需确保 /clock topic 有发布者。
+
+Q: 力传感器读数为 NaN 或 Inf？
+A: 传感器驱动未正常启动；检查 USB 连接；运行驱动诊断脚本。
+
+Q: 相机出图但严重过曝/过暗？
+A: 调整相机曝光参数(自动曝光 or 固定曝光)。
+   仿真中光照完美，真实环境需补光。
+
+Q: npz 文件格式与仿真不兼容导致 Dataset 加载报错？
+A: 比对 npz 的 keys。确保 "frames", "forces", "velocities",
+   "contact_states_gt" 4个字段都存在且维度一致。
+
+Q: 采集到一半程序崩溃，机械臂停在半路？
+A: 在采集循环中加 try-finally，finally 中执行安全回位。
+   也可用 ROS actionlib 的 preempt 机制。
+
+Q: 不同传感器时间戳偏差过大(>200ms)？
+A: 检查 NTP 时间同步；检查各ROS节点是否运行在同一机器上；
+   如无法解决，可在后处理中手动补偿固定偏移。
+
+
+============================================================
+文件结束
+============================================================
+最后提醒:
+  1. 采集前在 ROS 中先 rosbag record -a 做一份完整备份
+  2. 每次实验记录传感器配置、时间戳、参数到实验日志
+  3. 真实数据 .npz 文件建议在文件名中标注采集日期和条件
+     (如 traj_0001_20260801_wood_surface.npz)

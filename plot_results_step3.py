@@ -41,18 +41,24 @@ MODEL_LABELS = {
     "vision_only": "Vision-Only (纯视觉)",
     "force_tcn":   "Force-TCN (力觉-only)",
     "event_tcn":   "Event-TCN (多模态)",
+    "force_lstm":  "Force-LSTM (力觉-only Bi-LSTM)",
+    "event_lstm":  "Event-LSTM (多模态 Bi-LSTM)",
 }
 MODEL_COLORS = {
     "force_mlp":   "#e74c3c",  # 红
     "vision_only": "#3498db",  # 蓝
     "force_tcn":   "#f39c12",  # 橙
     "event_tcn":   "#2ecc71",  # 绿
+    "force_lstm":  "#9b59b6",  # 紫
+    "event_lstm":  "#1abc9c",  # 青
 }
 MODEL_MARKERS = {
     "force_mlp":   "s",
     "vision_only": "o",
     "force_tcn":   "D",
     "event_tcn":   "^",
+    "force_lstm":  "v",
+    "event_lstm":  "p",
 }
 TASK_LABELS = {
     "stick_slip":  "Task 1: Stick-Slip",

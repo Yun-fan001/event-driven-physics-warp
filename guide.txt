@@ -45,19 +45,23 @@ PyTorch 问题后续处理（Step 2 之前解决即可）
 
 ---------------------------------------
 Step 2
----------------------------------------
+--------------------------------------
 # 1. 采集数据 (每个任务 200 条)
 python collect_data_step2.py --task stick_slip   --num-episodes 200 --output-dir data/stick_slip
 python collect_data_step2.py --task peg_in_hole  --num-episodes 200 --output-dir data/peg_in_hole
 python collect_data_step2.py --task stack_block  --num-episodes 200 --output-dir data/stack_block
 
-# 2. 训练模型 (3 任务 × 3 模型 = 9 组实验)
+# 2. 训练模型 (3 任务 × 6 模型 = 18 组实验)
 # 例: Task 1 + Event-TCN
 python train_step2.py --task stick_slip --model event_tcn --data-dir data/stick_slip --epochs 50
 
 # 3. 数据效率实验 (只用 10% / 50% 数据)
 python train_step2.py --task stick_slip --model event_tcn --data-dir data/stick_slip --data-fraction 0.1
 python train_step2.py --task stick_slip --model event_tcn --data-dir data/stick_slip --data-fraction 0.5
+
+# 4. TCN 训练不稳定时的降级方案
+python train_step2.py --task stick_slip --model event_lstm --data-dir data/stick_slip --epochs 50
+python train_step2.py --task stick_slip --model force_lstm --data-dir data/stick_slip --epochs 50
 
 先跑通 collect_data_step2.py --task peg_in_hole --num-episodes 10 验证场景物理稳定性
 如果 Task 3 方块滑落/吸不住，调大 stack_block.xml 中的 friction="1.5" 或 gripper_geom 质量
@@ -68,9 +72,10 @@ python train_step2.py --task stick_slip --model event_tcn --data-dir data/stick_
 | ------------------------- | -------------------------------------------------------------------------- 
 | **Task 2 简化**             | Peg 直接用 slide joint 控制 z 方向，避免 freejoint 倾倒不稳定，核心验证 Contact/NoContact 检测即可 
 | **Task 3 吸盘设计**           | 用高摩擦圆柱代替复杂夹爪 finger，通过"压紧-提起"物理实现抓取，状态机自动执行序列                              |
-| **Force-MLP 基线**            | 力觉序列编码 + 力回归辅助任务(MSE) + 事件分类头，探究力觉特征对事件预测的贡献 
+| **Force-MLP 基线**            | 纯力回归(MSE) + 固定阈值判定事件。严格模拟传统「先恢复物理量→再规则推理」路径 
 | **Vision-Only 用单向 LSTM** | 保证与 Event-TCN 一致的因果性（不窥探未来帧），公平对比多模态与单模态性能 
-| **Event-TCN 因果卷积**        | 确保实时性（t 时刻输出只依赖 ≤t 输入），适合机器人在线部署                                           |
+| **Event-TCN 因果卷积**        | 确保实时性（t 时刻输出只依赖 ≤t 输入），适合机器人在线部署                                           
+| **Event-LSTM 降级方案**       | Bi-LSTM 替代因果卷积，TCN 训练不稳定时使用。注意: Bi-LSTM 双向引入未来帧，不保证因果性，论文需讨论       
 | **统一 Dataset 接口**         | `seq_len` 参数支持截断/填充，方便后续做不同长度实验                                            
 
 

@@ -1,10 +1,12 @@
 """
 Step 2 训练脚本
-支持 3 个任务 × 4 个模型 的实验矩阵:
+支持 3 个任务 × 6 个模型 的实验矩阵:
   force_mlp    — 基线A: 连续力回归 + 固定阈值判定事件
   vision_only  — 基线B: 纯视觉事件分类
   force_tcn    — 消融: 力觉-only TCN (无视觉)
   event_tcn    — 主模型: 多模态 TCN (视觉+力觉+本体)
+  force_lstm   — 降级消融: 力觉-only Bi-LSTM (TCN 不稳定时)
+  event_lstm   — 降级方案: 多模态 Bi-LSTM (TCN 不稳定时)
 
 额外功能: 数据效率实验 (--data-fraction), 噪声鲁棒性实验 (--force-noise-std, --time-shift-ms)
 """
@@ -24,7 +26,7 @@ from torch.utils.data import DataLoader
 from tqdm import tqdm
 
 from dataset import ContactEventDataset
-from models import ForceMLP, VisionOnly, EventTCN
+from models import ForceMLP, VisionOnly, EventTCN, EventLSTM
 
 # ============================================================
 # 任务配置
@@ -47,7 +49,7 @@ TASK_CONFIG = {
     },
 }
 
-MODEL_CHOICES = ["force_mlp", "vision_only", "force_tcn", "event_tcn"]
+MODEL_CHOICES = ["force_mlp", "vision_only", "force_tcn", "event_tcn", "force_lstm", "event_lstm"]
 
 # ============================================================
 # Force-MLP 基线核心: 预测连续力 → 固定阈值 → 离散事件
@@ -117,10 +119,14 @@ def add_time_shift(
     dt: float = 0.002,  # timestep = 0.002s
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor | None]:
     """
-    视觉与力觉之间加入时间偏移。
+    视觉与力觉之间加入时间偏移，模拟异步采集。
     shift_ms > 0: 视觉滞后力觉; shift_ms < 0: 视觉领先力觉。
-    正偏移: vision(t) 与 force(t+shift_frames) 配对 → 裁剪 force 前若干帧。
-    实际注入: 对 vision 应用 roll 操作，模拟异步采集。
+    
+    统一策略: 仅平移 vision 模态，force/proprio/labels 始终对齐。
+    -- 因为事件标签由力觉物理量决定，labels 应与 force 保持配对不变 --
+    
+    正偏移: vision 向后平移 (roll +shift_frames) → vision(t) 看到旧帧
+    负偏移: vision 向前平移 (roll -shift_frames) → vision(t) 看到新帧
     """
     if abs(shift_ms) < 1e-6:
         return vision, force, proprio, labels
@@ -134,20 +140,18 @@ def add_time_shift(
         shift_frames = T - 1
 
     if shift_ms > 0:
-        # 视觉滞后: vision 向前平移 (丢前面帧, 末尾补0)
+        # 视觉滞后力觉: vision(t) 对应 force(t-shift_frames)
+        # 将 vision 向后平移，前面用首帧填充（保持对齐语义统一）
+        vision = torch.roll(vision, shifts=shift_frames, dims=1)
+        vision[:, :shift_frames] = vision[:, shift_frames:shift_frames + 1]
+    else:
+        # 视觉领先力觉: vision(t) 对应 force(t+shift_frames)
+        # 将 vision 向前平移，后面用尾帧填充
         vision = torch.roll(vision, shifts=-shift_frames, dims=1)
         vision[:, -shift_frames:] = vision[:, -shift_frames - 1: -shift_frames]
-    else:
-        # 视觉领先: force/proprio 向前平移
-        force = torch.roll(force, shifts=-shift_frames, dims=1)
-        force[:, -shift_frames:] = force[:, -shift_frames - 1: -shift_frames]
-        proprio = torch.roll(proprio, shifts=-shift_frames, dims=1)
-        proprio[:, -shift_frames:] = proprio[:, -shift_frames - 1: -shift_frames]
-        if labels is not None:
-            labels = labels.clone()
-            labels[:, :-shift_frames] = labels[:, shift_frames:]
-            labels[:, -shift_frames:] = -100  # ignore_index
 
+    # force/proprio/labels 始终对齐，无需调整
+    # (事件由 force 物理量决定，labels 与 force 配对不变)
     return vision, force, proprio, labels
 
 
@@ -162,6 +166,8 @@ class ModelWrapper(nn.Module):
     vision_only: LSTM 视觉分类
     force_tcn:   力觉-only TCN (消融实验)
     event_tcn:   多模态 TCN (完整版)
+    force_lstm:  力觉-only Bi-LSTM (TCN 不稳定时的降级消融)
+    event_lstm:  多模态 Bi-LSTM (TCN 不稳定时的降级方案)
     """
     def __init__(self, model_name: str, task: str):
         super().__init__()
@@ -190,6 +196,21 @@ class ModelWrapper(nn.Module):
                 force_dim=cfg["force_dim"],
                 proprio_dim=cfg["proprio_dim"],
             )
+        elif model_name == "force_lstm":
+            # TCN 不稳定时的降级方案: 力觉-only Bi-LSTM
+            self.model = EventLSTM(
+                num_classes=cfg["num_classes"],
+                vision_feat_dim=0,           # 0 → 跳过视觉编码
+                force_dim=cfg["force_dim"],
+                proprio_dim=cfg["proprio_dim"],
+            )
+        elif model_name == "event_lstm":
+            # TCN 不稳定时的降级方案: 多模态 Bi-LSTM
+            self.model = EventLSTM(
+                num_classes=cfg["num_classes"],
+                force_dim=cfg["force_dim"],
+                proprio_dim=cfg["proprio_dim"],
+            )
         else:
             raise ValueError(f"未知模型: {model_name}")
 
@@ -205,11 +226,9 @@ class ModelWrapper(nn.Module):
         elif self.model_name == "vision_only":
             logits = self.model(vision)
             return logits, None
-        elif self.model_name == "force_tcn":
-            # 力觉-only: vision 传 None, EventTCN 内部处理
-            logits = self.model(vision, force, proprio)
-            return logits, None
-        else:  # event_tcn
+        else:
+            # force_tcn / event_tcn / force_lstm / event_lstm
+            # vision 传 None 时由模型内部处理（force-only 模式）
             logits = self.model(vision, force, proprio)
             return logits, None
 

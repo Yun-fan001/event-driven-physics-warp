@@ -38,7 +38,7 @@ from pathlib import Path
 # 实验配置
 # ============================================================
 TASKS = ["stick_slip", "peg_in_hole", "stack_block"]
-MODELS = ["force_mlp", "vision_only", "force_tcn", "event_tcn"]
+MODELS = ["force_mlp", "vision_only", "force_tcn", "event_tcn", "force_lstm", "event_lstm"]
 
 DATA_FRACTIONS = [0.1, 0.5, 1.0]  # 数据效率实验: 10%/50%/100%
 

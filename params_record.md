@@ -22,4 +22,6 @@
 | `force_noise_std`         | `train_step2.py`                | 0.0           | **Step 3 噪声实验专用**。模拟力传感器零漂: 0.1 轻微 / 0.3 中等 / 0.5 重度。预期 Force-MLP 对此敏感，Event-TCN 鲁棒                 
 | `time_shift_ms`           | `train_step2.py`                | 0.0           | **Step 3 噪声实验专用**。模拟视觉-力觉异步采集: ±50/±100/±200ms。正=视觉滞后，负=视觉领先。支撑"时间同步比力值精度更重要"论点           
 | `vision_feat_dim`         | `models/event_tcn.py`           | 64            | **消融实验**: 设为 0 时跳过视觉编码器 → 退化为 Force-TCN (力觉-only)，用于消融验证多模态贡献                                    
+| `num_layers` (LSTM)       | `models/event_lstm.py`          | 2             | **Event-LSTM 降级方案**: LSTM 层数。训练不稳定 → 减小(1)；欠拟合 → 增大(3)。与 `models/vision_only.py` 的 num_layers 默认值对齐 
+| `bidirectional` (LSTM)    | `models/event_lstm.py`          | True          | **Event-LSTM 使用双向 LSTM**。注意: 双向引未来帧，不保证因果性，不适合在线部署。论文需讨论此 trade-off (因果性 vs 准确率) 
 | `data_fraction`           | `train_step2.py` / `run_experiments_step3.py` | 1.0 | **Step 3 数据效率实验核心参数**。10% 数据训练 → 0.1；50% → 0.5；100% → 1.0。验收标准: Event-TCN @ 50% F1 > Force-MLP @ 100% F1          
