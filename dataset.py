@@ -98,15 +98,22 @@ class ContactEventDataset(Dataset):
                 frames = np.pad(frames, ((0, pad), (0, 0), (0, 0), (0, 0)), mode="edge")
                 forces = np.pad(forces, ((0, pad), (0, 0)), mode="edge")
                 velocities = np.pad(velocities, ((0, pad), (0, 0)), mode="edge")
-                states = np.pad(states, (0, pad), mode="edge", constant_values=-100)
+                # 修复(缺陷7): 标签必须用 constant 填充 -100 (与 ignore_index 对齐),
+                # 原 mode="edge" 会复制末帧标签导致填充帧被错误训练
+                states = np.pad(states, (0, pad), mode="constant", constant_values=-100)
                 proprio = np.pad(proprio, ((0, pad), (0, 0)), mode="edge")
 
-        # 力觉输入: 力 + 速度拼接 (6维)
-        force_input = np.concatenate([forces, velocities], axis=-1)
+        # 修复(缺陷5): 模型输入去除速度通道 —— 标签(GT)由速度阈值定义,
+        # 若速度拼入输入则"标签≈输入的确定性函数", 数据效率实验无区分度。
+        # force_input 仅为力 (3维)。速度仍保留在 npz 中用于标注/分析/可视化。
+        force_input = forces
 
         sample = {
             "vision": torch.from_numpy(frames).float(),
             "force": torch.from_numpy(force_input).float(),
+            # velocity 仅 RuleDetector 基线使用 (力+速度手调阈值自动标注器),
+            # 学习模型 (Event-TCN/Force-MLP/...) 不接收速度通道 (缺陷5修复)
+            "velocity": torch.from_numpy(velocities).float(),
             "proprio": torch.from_numpy(proprio).float(),
             "label": torch.from_numpy(states).long(),
             "task": self.task,

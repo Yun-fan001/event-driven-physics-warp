@@ -1,5 +1,53 @@
 ---------------------------------------
-Step 1
+快速指南 (2026-11 重规划修复版)
+---------------------------------------
+环境: D:\projects\event-driven-physics-warp\.venv (uv, Python 3.12, MuJoCo 3.15)
+所有命令在项目根目录 D:\projects\event-driven-physics-warp 下运行。
+
+# 0. 环境检查
+.venv\Scripts\python.exe check_env_v2.py
+.venv\Scripts\python.exe smoke_env.py   # 三任务物理冒烟测试
+
+# 1. 采集单条轨迹并可视化调参 (每任务各 1 条)
+.venv\Scripts\python.exe collect_data_step2.py --task stick_slip  --num-episodes 1 --output-dir data/test/stick_slip
+.venv\Scripts\python.exe collect_data_step2.py --task peg_in_hole --num-episodes 1 --output-dir data/test/peg_in_hole
+.venv\Scripts\python.exe collect_data_step2.py --task stack_block --num-episodes 1 --output-dir data/test/stack_block
+
+# 2. 可视化 (GT 黑线 vs Auto 红线 vs 事件竖线)
+.venv\Scripts\python.exe visualize_step2.py --task stick_slip  --traj data/test/stick_slip/traj_0000.npz
+.venv\Scripts\python.exe visualize_step2.py --task peg_in_hole --traj data/test/peg_in_hole/traj_0000.npz
+.venv\Scripts\python.exe visualize_step2.py --task stack_block --traj data/test/stack_block/traj_0000.npz
+
+# 3. 标注质量报告 (事件 F1/P/R ±5帧 + 时间误差分布, 中位数<=2帧)
+.venv\Scripts\python.exe annotation_report.py --task all --data-dir data/test
+
+# 4. 正式采集 (3 任务 x 200 条; 训练/测试按 seed 划分, 如 0-169 训练 + 170-199 测试)
+.venv\Scripts\python.exe collect_data_step2.py --task stick_slip  --num-episodes 200 --output-dir data/stick_slip
+.venv\Scripts\python.exe collect_data_step2.py --task peg_in_hole --num-episodes 200 --output-dir data/peg_in_hole
+.venv\Scripts\python.exe collect_data_step2.py --task stack_block --num-episodes 200 --output-dir data/stack_block
+
+# 5. 训练 (主模型 Event-TCN)
+.venv\Scripts\python.exe train_step2.py --task stick_slip --model event_tcn --data-dir data/stick_slip --epochs 50
+
+# 6. 全模型对比 (含 RuleDetector 零训练基线)
+.venv\Scripts\python.exe train_step2.py --task stick_slip --model rule_detector --data-dir data/stick_slip
+.venv\Scripts\python.exe train_step2.py --task stick_slip --model force_mlp    --data-dir data/stick_slip --epochs 50
+.venv\Scripts\python.exe train_step2.py --task stick_slip --model vision_only  --data-dir data/stick_slip --epochs 50
+
+# 7. 批量实验矩阵 + 绘图
+.venv\Scripts\python.exe run_experiments_step3.py --exp data_efficiency --dry-run
+.venv\Scripts\python.exe run_experiments_step3.py --exp data_efficiency
+.venv\Scripts\python.exe run_experiments_step3.py --exp collect --output results_step3.json
+.venv\Scripts\python.exe plot_results_step3.py --results results_step3.json --output-dir figures/
+
+# 修复后的验收标准 (《实验规划》重规划版):
+#   事件 macro-F1/P/R (±5帧容差) + 事件时刻误差中位数 <= 2 帧 + 3 随机种子
+#   主线: Event-TCN @ 50% 数据 F1 >= Force-MLP @ 100% 数据 F1
+#   基线: RuleDetector (零训练手调阈值) 必须被主模型明确超越
+#   诚实条款: 未达预期转原因分析写入 Limitation, 绝不改数据
+
+---------------------------------------
+Step 1 (旧版种子采集, 兼容保留)
 ---------------------------------------
 # 1. 安装依赖
 pip install -r requirements.txt
@@ -17,7 +65,7 @@ python visualize_trajectory.py --traj data/test/traj_0000.npz
 python collect_seed_data.py --num-episodes 100 --output-dir data/seed
 
 # 5. 验收
-python validate_step1.py
+python validate_step1.py --data-dir data/seed
 
 
 PyTorch 问题后续处理（Step 2 之前解决即可）

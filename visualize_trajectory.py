@@ -44,8 +44,8 @@ def main():
     axes[1].plot(t, vx, label="v_x", color="green", linewidth=1.5)
     axes[1].axhline(0.0, color="k", linewidth=0.8, linestyle="-")  # 零速线
     # 标注阈值
-    axes[1].axhline(0.01, color="orange", linewidth=0.8, linestyle="--", alpha=0.5, label="stick_thresh")
-    axes[1].axhline(0.02, color="red", linewidth=0.8, linestyle="--", alpha=0.5, label="slip_thresh")
+    axes[1].axhline(0.008, color="orange", linewidth=0.8, linestyle="--", alpha=0.5, label="stick_thresh")
+    axes[1].axhline(0.012, color="red", linewidth=0.8, linestyle="--", alpha=0.5, label="slip_thresh")
     axes[1].set_ylabel("Velocity (m/s)", fontsize=11)
     axes[1].legend(loc="upper left")
     axes[1].grid(True, alpha=0.3)

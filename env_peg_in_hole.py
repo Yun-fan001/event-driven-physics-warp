@@ -25,10 +25,12 @@ class ContactState(IntEnum):
 @dataclass
 class EpisodeConfig:
     max_steps: int = 400          # 单条最大 400 步 × 0.002s = 0.8s
-    insert_speed: float = 0.0008  # 每步下降距离 (m/step)
+    insert_speed: float = 0.0004  # 每步下降距离 (m/step) = 0.2 m/s 插入
     image_width: int = 128
     image_height: int = 128
-    contact_force_threshold: float = 1.0  # 接触力阈值 (N)
+    z_min: float = 0.05           # 目标下限 (接触位约 0.06, 避免伺服误差过大产生虚假大力)
+    lateral_offset_max: float = 0.002  # 侧向偏移随机化上限 (m), 对应规划 0-2 mm
+    contact_force_threshold: float = 1.0  # 仅用于记录/参考, GT 不再使用力判据
 
 
 class PegInHoleEnv(gym.Env):
@@ -75,10 +77,15 @@ class PegInHoleEnv(gym.Env):
         self._rng = np.random.default_rng(seed)
 
         # 预计算传感器/关节地址，加速每步访问
-        self._force_adr = self.model.sensor("peg_force").adr[0]
         self._vel_adr = self.model.sensor("peg_vel").adr[0]
-        self._peg_qpos_adr = self.model.joint("peg_z").qposadr[0]
-        self._peg_act_id = self.model.actuator("peg_pos").id
+        self._touch_adr = self.model.sensor("peg_touch").adr[0]
+        self._peg_x_qpos_adr = self.model.joint("peg_x").qposadr[0]
+        self._peg_y_qpos_adr = self.model.joint("peg_y").qposadr[0]
+        self._peg_z_qpos_adr = self.model.joint("peg_z").qposadr[0]
+        self._peg_x_act = self.model.actuator("peg_x_pos").id
+        self._peg_y_act = self.model.actuator("peg_y_pos").id
+        self._peg_z_act = self.model.actuator("peg_z_pos").id
+        self._peg_geom_id = self.model.geom("peg_geom").id
 
     def reset(self, *, seed: int | None = None, options: dict[str, Any] | None = None):
         super().reset(seed=seed)
@@ -86,16 +93,24 @@ class PegInHoleEnv(gym.Env):
             self._rng = np.random.default_rng(seed)
 
         mujoco.mj_resetData(self.model, self.data)
+        options = options or {}
 
-        # 随机化初始高度和摩擦系数
-        init_z = options.get("init_z", 0.15) if options else 0.15
-        friction_scale = options.get("friction_scale", 1.0) if options else 1.0
+        # 随机化初始高度、摩擦系数、侧向偏移 (0-2 mm)
+        init_z = float(options.get("init_z", self._rng.uniform(0.12, 0.18)))
+        friction_scale = float(options.get("friction_scale", 1.0))
+        x_off = float(options.get("lateral_x", self._rng.uniform(-self.config.lateral_offset_max, self.config.lateral_offset_max)))
+        y_off = float(options.get("lateral_y", self._rng.uniform(-self.config.lateral_offset_max, self.config.lateral_offset_max)))
 
         self.model.geom("socket_bottom").friction[0] = 0.6 * friction_scale
         self.model.geom("peg_geom").friction[0] = 0.6 * friction_scale
 
-        self.data.qpos[self._peg_qpos_adr] = init_z
+        self.data.qpos[self._peg_x_qpos_adr] = x_off
+        self.data.qpos[self._peg_y_qpos_adr] = y_off
+        self.data.qpos[self._peg_z_qpos_adr] = init_z
         self.data.qvel[:] = 0.0
+        self.data.ctrl[self._peg_x_act] = x_off
+        self.data.ctrl[self._peg_y_act] = y_off
+        self.data.ctrl[self._peg_z_act] = init_z
         self._peg_target_z = init_z
         self._step_count = 0
 
@@ -110,8 +125,11 @@ class PegInHoleEnv(gym.Env):
         # action 控制速度倍率，实际运动方向固定为向下插入
         speed = 0.5 + 0.5 * float(np.clip(action[0], 0.0, 1.0))
         delta = speed * self.config.insert_speed
-        self._peg_target_z = np.clip(self._peg_target_z - delta, 0.02, 0.20)
-        self.data.ctrl[self._peg_act_id] = self._peg_target_z
+        self._peg_target_z = np.clip(self._peg_target_z - delta, self.config.z_min, 0.20)
+        self.data.ctrl[self._peg_z_act] = self._peg_target_z
+        # 侧向偏移保持
+        self.data.ctrl[self._peg_x_act] = self.data.qpos[self._peg_x_qpos_adr]
+        self.data.ctrl[self._peg_y_act] = self.data.qpos[self._peg_y_qpos_adr]
 
         mujoco.mj_step(self.model, self.data)
 
@@ -131,18 +149,36 @@ class PegInHoleEnv(gym.Env):
         return self.renderer.render()
 
     def _get_contact_force(self) -> np.ndarray:
-        return self.data.sensordata[self._force_adr : self._force_adr + 3].copy()
+        """真实接触力 (世界系, 3维): data.contact + mj_contactForce。
+
+        修复(缺陷1): 原 <force> 传感器测的是 body 与父级约束力
+        (= 自重 + 位置伺服弹簧力, peg 自重 0.5kg 即 4.9N 恒定偏置)。
+        """
+        f = np.zeros(3)
+        for i in range(self.data.ncon):
+            c = self.data.contact[i]
+            if c.geom1 == self._peg_geom_id or c.geom2 == self._peg_geom_id:
+                tmp = np.zeros(6)
+                mujoco.mj_contactForce(self.model, self.data, i, tmp)
+                f += tmp[:3]
+        return f.astype(np.float32)
 
     def _get_peg_velocity(self) -> np.ndarray:
         return self.data.sensordata[self._vel_adr : self._vel_adr + 3].copy()
 
+    def _get_touch(self) -> float:
+        return float(self.data.sensordata[self._touch_adr])
+
     # ============================================================
-    # 接触状态判定 —— 论文 Ground Truth
-    # 逻辑: 接触力模值超过阈值 → CONTACT，否则 NO_CONTACT
+    # GT 接触状态判定 —— 运动学真值 (缺陷4修复: GT 运动学化)
+    #   接触 = 几何间距判据 (peg_tip 与 socket 底面距离)
     # ============================================================
     def _is_in_contact(self) -> bool:
-        force = self._get_contact_force()
-        return np.linalg.norm(force) > self.config.contact_force_threshold
+        # peg_tip 世界 z = peg_z qpos - 0.05 (body 在原点, 几何半高 0.05)
+        tip_z = float(self.data.qpos[self._peg_z_qpos_adr]) - 0.05
+        # socket_bottom 顶面 z = 0.01 (box 中心 0.005 + 半高 0.005)
+        socket_top_z = 0.01
+        return tip_z <= socket_top_z + 0.001
 
     def _get_contact_state(self) -> ContactState:
         if self._is_in_contact():
@@ -152,7 +188,7 @@ class PegInHoleEnv(gym.Env):
     def _get_obs(self) -> np.ndarray:
         force = self._get_contact_force()
         vel = self._get_peg_velocity()
-        peg_z = self.data.qpos[self._peg_qpos_adr]
+        peg_z = self.data.qpos[self._peg_z_qpos_adr]
         state = float(self._get_contact_state())
         return np.concatenate([force, vel, [peg_z, state]]).astype(np.float32)
 
@@ -165,8 +201,11 @@ class PegInHoleEnv(gym.Env):
             "velocity": vel.astype(np.float32),
             "contact_state": int(state),
             "contact_state_name": state.name,
-            "peg_z": float(self.data.qpos[self._peg_qpos_adr]),
+            "peg_z": float(self.data.qpos[self._peg_z_qpos_adr]),
+            "peg_x": float(self.data.qpos[self._peg_x_qpos_adr]),
+            "peg_y": float(self.data.qpos[self._peg_y_qpos_adr]),
             "in_contact": bool(self._is_in_contact()),
+            "touch": self._get_touch(),
         }
 
     def close(self):

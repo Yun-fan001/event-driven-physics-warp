@@ -34,22 +34,22 @@ from models import ForceMLP, VisionOnly, EventTCN, EventLSTM
 TASK_CONFIG = {
     "stick_slip": {
         "num_classes": 3,
-        "force_dim": 6,      # 力(3) + 速度(3)
+        "force_dim": 3,      # 修复(缺陷5/7): 仅力(3), 速度通道已从模型输入移除
         "proprio_dim": 1,    # pusher_x
     },
     "peg_in_hole": {
         "num_classes": 2,
-        "force_dim": 6,
+        "force_dim": 3,
         "proprio_dim": 1,    # peg_z
     },
     "stack_block": {
         "num_classes": 3,
-        "force_dim": 6,
+        "force_dim": 3,
         "proprio_dim": 2,    # gripper_x, gripper_z
     },
 }
 
-MODEL_CHOICES = ["force_mlp", "vision_only", "force_tcn", "event_tcn", "force_lstm", "event_lstm"]
+MODEL_CHOICES = ["force_mlp", "vision_only", "force_tcn", "event_tcn", "force_lstm", "event_lstm", "rule_detector"]
 
 # ============================================================
 # Force-MLP 基线核心: 预测连续力 → 固定阈值 → 离散事件
@@ -59,37 +59,70 @@ MODEL_CHOICES = ["force_mlp", "vision_only", "force_tcn", "event_tcn", "force_ls
 # 阈值与各环境 GT 判定逻辑一致 (见 env_*.py)。
 # ============================================================
 def force_to_events(
-    force_pred: torch.Tensor,    # (B, T, 3)  预测的三维力
-    force_input: torch.Tensor,   # (B, T, 6)  原始力+速度 [fx,fy,fz,vx,vy,vz]
+    force: torch.Tensor,       # (B, T, 3) 力序列 (预测力或原始传感器力)
     task: str,
+    force_delta_threshold: float = 2.0,
+    velocity: torch.Tensor | None = None,   # (B, T, 3) 可选: RuleDetector 用的速度信号
 ) -> torch.Tensor:
     """
     固定阈值转为离散事件标签。
-    Task 1 (stick_slip):  |F_xy| > 0.5 → Contact; |v_x| < 0.01 → Stick else Slip
+    Task 1 (stick_slip):
+      - 提供 velocity 时: 力接触迟滞 + 速度迟滞带状态机 (= 自动标注器本身, RuleDetector 基线)
+      - 无 velocity 时: 纯力规则 (|F_xy|>0.5 接触; 力窗口突降→Slip) — Force-MLP 评估用
     Task 2 (peg_in_hole): |F| > 1.0 → Contact
-    Task 3 (stack_block): |F| > 2.0 → Grip (简化版, 仅用力)
+    Task 3 (stack_block): |F| > 1.5 → Grip (纯力无法判 Release, 已知局限, 论文中讨论)
     Returns: (B, T) LongTensor
     """
+    if task == "stick_slip" and velocity is not None:
+        # RuleDetector: 与 event_annotation_v2.annotate_stick_slip 相同的迟滞带规则
+        B, T = force.shape[:2]
+        force_mag = torch.norm(force[:, :, :2], dim=-1)
+        vx = velocity[:, :, 0].abs()
+        events = torch.zeros(B, T, dtype=torch.long, device=force.device)
+        for b in range(B):
+            in_contact = False
+            state = 0
+            for t in range(T):
+                if in_contact:
+                    in_contact = bool(force_mag[b, t] > 0.3)
+                else:
+                    in_contact = bool(force_mag[b, t] > 0.5)
+                if not in_contact:
+                    state = 0
+                elif state == 0:
+                    state = 1  # 进入接触 → STICK
+                elif state == 2:
+                    if vx[b, t] < 0.008:
+                        state = 1
+                else:
+                    if vx[b, t] > 0.011:
+                        state = 2
+                events[b, t] = state
+        return events
     if task == "stick_slip":
-        force_mag = torch.norm(force_pred[:, :, :2], dim=-1)
-        vel_x = force_input[:, :, 3]
+        force_mag = torch.norm(force[:, :, :2], dim=-1)          # (B, T)
         in_contact = force_mag > 0.5
-        is_stick = torch.abs(vel_x) < 0.01
+        # 力窗口突降 (5帧窗口, 与自动标注一致) → Slip
+        win = 5
+        d_f = torch.zeros_like(force_mag)
+        if force_mag.shape[1] > win:
+            d_f[:, win:] = force_mag[:, win:] - force_mag[:, :-win]
+        is_slip = (d_f < -force_delta_threshold) & in_contact
         events = torch.where(
             ~in_contact,
-            torch.zeros_like(force_mag, dtype=torch.long),                 # 0=NO_CONTACT
-            torch.where(is_stick,
-                        torch.ones_like(force_mag, dtype=torch.long),      # 1=STICK
-                        2 * torch.ones_like(force_mag, dtype=torch.long)), # 2=SLIP
+            torch.zeros_like(force_mag, dtype=torch.long),       # 0=NO_CONTACT
+            torch.where(is_slip,
+                        2 * torch.ones_like(force_mag, dtype=torch.long),  # 2=SLIP
+                        torch.ones_like(force_mag, dtype=torch.long)),     # 1=STICK
         )
     elif task == "peg_in_hole":
-        force_mag_3d = torch.norm(force_pred, dim=-1)
+        force_mag_3d = torch.norm(force, dim=-1)
         in_contact = force_mag_3d > 1.0
         events = in_contact.long()   # 0/1
     elif task == "stack_block":
-        force_mag_3d = torch.norm(force_pred, dim=-1)
+        force_mag_3d = torch.norm(force, dim=-1)
         events = torch.where(
-            force_mag_3d > 2.0,
+            force_mag_3d > 0.6,
             torch.ones_like(force_mag_3d, dtype=torch.long),    # 1=GRIP
             torch.zeros_like(force_mag_3d, dtype=torch.long),   # 0=NO_CONTACT
         )
@@ -211,6 +244,10 @@ class ModelWrapper(nn.Module):
                 force_dim=cfg["force_dim"],
                 proprio_dim=cfg["proprio_dim"],
             )
+        elif model_name == "rule_detector":
+            # 基线C (新增): 零训练手调阈值规则 —— 代表"工程师手工方案"。
+            # 无参数, 评估时对原始传感器力直接施加阈值规则。
+            self.model = None
         else:
             raise ValueError(f"未知模型: {model_name}")
 
@@ -219,10 +256,13 @@ class ModelWrapper(nn.Module):
         Returns:
             force_mlp:  (force_pred, None)  只有连续力预测
             其他模型:   (logits, None)       分类 logits
+            rule_detector: (None, None)      无参数, 直接对原始力应用阈值规则
         """
         if self.model_name == "force_mlp":
             force_pred = self.model(force)  # (B, T, 3)
             return None, force_pred
+        elif self.model_name == "rule_detector":
+            return None, None
         elif self.model_name == "vision_only":
             logits = self.model(vision)
             return logits, None
@@ -253,6 +293,7 @@ def train_epoch(
     for batch in tqdm(loader, desc="Train"):
         vision = batch["vision"].to(device)
         force = batch["force"].to(device)
+        velocity = batch["velocity"].to(device)
         proprio = batch["proprio"].to(device)
         labels = batch["label"].to(device)
 
@@ -262,6 +303,16 @@ def train_epoch(
             vision, force, proprio, labels, time_shift_ms,
             seq_len=vision.shape[1],
         )
+
+        if model.model_name == "rule_detector":
+            # 零训练基线: 无参数, 对原始 力+速度 应用手调阈值规则 (自动标注器本身)
+            with torch.no_grad():
+                events = force_to_events(force, model.task, velocity=velocity)
+                mask = labels != ignore_index
+                correct += ((events == labels) & mask).sum().item()
+                total += mask.sum().item()
+            total_loss += 0.0
+            continue
 
         optimizer.zero_grad()
         logits, force_pred = model(vision, force, proprio)
@@ -273,7 +324,7 @@ def train_epoch(
 
             # 训练时的 acc: 通过阈值判定计算
             with torch.no_grad():
-                events = force_to_events(force_pred, force, model.task)
+                events = force_to_events(force_pred, model.task)
                 mask = labels != ignore_index
                 correct += ((events == labels) & mask).sum().item()
                 total += mask.sum().item()
@@ -302,6 +353,7 @@ def eval_epoch(
     loader: DataLoader,
     device: torch.device,
     ignore_index: int = -100,
+    force_noise_std: float = 0.0,
 ):
     model.eval()
     total_loss = 0.0
@@ -313,27 +365,35 @@ def eval_epoch(
     for batch in tqdm(loader, desc="Eval"):
         vision = batch["vision"].to(device)
         force = batch["force"].to(device)
+        velocity = batch["velocity"].to(device)
         proprio = batch["proprio"].to(device)
         labels = batch["label"].to(device)
 
-        logits, force_pred = model(vision, force, proprio)
-
-        if model.model_name == "force_mlp":
-            # force_mlp: 预测力 → 阈值 → 离散事件 (不加分类头)
-            force_target = force[:, :, :3]
-            loss = F.mse_loss(force_pred, force_target)
-            events = force_to_events(force_pred, force, model.task)
+        if model.model_name == "rule_detector":
+            # 零训练基线: 对原始 力+速度 应用手调阈值规则 (自动标注器本身)
+            # 噪声实验时对力通道注入同强度噪声 (与学习模型公平对比)
+            force_n = add_force_noise(force, force_noise_std)
+            events = force_to_events(force_n, model.task, velocity=velocity)
             preds = events
+            total_loss += 0.0
         else:
-            B, T, C = logits.shape
-            loss = F.cross_entropy(
-                logits.reshape(B * T, C),
-                labels.reshape(B * T),
-                ignore_index=ignore_index,
-            )
-            preds = logits.argmax(dim=-1)
+            logits, force_pred = model(vision, force, proprio)
 
-        total_loss += loss.item()
+            if model.model_name == "force_mlp":
+                # force_mlp: 预测力 → 阈值 → 离散事件 (不加分类头)
+                force_target = force[:, :, :3]
+                loss = F.mse_loss(force_pred, force_target)
+                events = force_to_events(force_pred, model.task)
+                preds = events
+            else:
+                B, T, C = logits.shape
+                loss = F.cross_entropy(
+                    logits.reshape(B * T, C),
+                    labels.reshape(B * T),
+                    ignore_index=ignore_index,
+                )
+                preds = logits.argmax(dim=-1)
+            total_loss += loss.item()
 
         mask = labels != ignore_index
         correct += ((preds == labels) & mask).sum().item()
@@ -422,14 +482,29 @@ def main():
 
     # 模型
     model = ModelWrapper(args.model, args.task).to(device)
-    optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
-    scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=20, gamma=0.5)
 
     output_dir = Path(args.output_dir) / args.task / args.model
     # 若开启噪声实验则写入子目录
     if args.force_noise_std > 0 or abs(args.time_shift_ms) > 1e-6:
         output_dir = output_dir / f"noise_f{args.force_noise_std}_t{args.time_shift_ms:.0f}ms"
     output_dir.mkdir(parents=True, exist_ok=True)
+
+    if model.model_name == "rule_detector":
+        # 零训练基线: 无参数, 跳过训练循环, 直接评估
+        print("[rule_detector] zero-training baseline, skip training loop")
+        test_metrics = eval_epoch(model, test_loader, device,
+                                  force_noise_std=args.force_noise_std)
+        print(f"\n[TEST] Acc={test_metrics['accuracy']:.4f}, "
+              f"F1={test_metrics['f1']:.4f}, "
+              f"P={test_metrics['precision']:.4f}, "
+              f"R={test_metrics['recall']:.4f}")
+        with open(output_dir / "test_results.json", "w") as f:
+            json.dump(test_metrics, f, indent=2)
+        print(f"[OK] eval done, results -> {output_dir}")
+        return
+
+    optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
+    scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=20, gamma=0.5)
 
     best_f1 = 0.0
     history = []
@@ -441,7 +516,8 @@ def main():
             force_noise_std=args.force_noise_std,
             time_shift_ms=args.time_shift_ms,
         )
-        val_metrics = eval_epoch(model, val_loader, device)
+        val_metrics = eval_epoch(model, val_loader, device,
+                                 force_noise_std=args.force_noise_std)
         scheduler.step()
 
         print(f"Train Loss: {train_loss:.4f} | Train Acc: {train_acc:.4f}")
@@ -465,13 +541,14 @@ def main():
                 "val_metrics": val_metrics,
                 "args": vars(args),
             }, output_dir / "best.pt")
-            print(f"✅ 保存最佳模型 (F1={best_f1:.4f})")
+            print(f"[SAVE] best model (F1={best_f1:.4f})")
 
     # 最终测试
     checkpoint = torch.load(output_dir / "best.pt")
     model.load_state_dict(checkpoint["model_state_dict"])
-    test_metrics = eval_epoch(model, test_loader, device)
-    print(f"\n🎯 测试集结果: Acc={test_metrics['accuracy']:.4f}, "
+    test_metrics = eval_epoch(model, test_loader, device,
+                              force_noise_std=args.force_noise_std)
+    print(f"\n[TEST] Acc={test_metrics['accuracy']:.4f}, "
           f"F1={test_metrics['f1']:.4f}, "
           f"P={test_metrics['precision']:.4f}, "
           f"R={test_metrics['recall']:.4f}")
@@ -481,7 +558,7 @@ def main():
     with open(output_dir / "test_results.json", "w") as f:
         json.dump(test_metrics, f, indent=2)
 
-    print(f"\n✅ 训练完成，结果保存到: {output_dir}")
+    print(f"\n[OK] training done, results -> {output_dir}")
 
 
 if __name__ == "__main__":

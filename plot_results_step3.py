@@ -43,6 +43,7 @@ MODEL_LABELS = {
     "event_tcn":   "Event-TCN (多模态)",
     "force_lstm":  "Force-LSTM (力觉-only Bi-LSTM)",
     "event_lstm":  "Event-LSTM (多模态 Bi-LSTM)",
+    "rule_detector": "RuleDetector (零训练手调阈值)",
 }
 MODEL_COLORS = {
     "force_mlp":   "#e74c3c",  # 红
@@ -51,6 +52,7 @@ MODEL_COLORS = {
     "event_tcn":   "#2ecc71",  # 绿
     "force_lstm":  "#9b59b6",  # 紫
     "event_lstm":  "#1abc9c",  # 青
+    "rule_detector": "#7f8c8d",  # 灰
 }
 MODEL_MARKERS = {
     "force_mlp":   "s",
@@ -59,6 +61,7 @@ MODEL_MARKERS = {
     "event_tcn":   "^",
     "force_lstm":  "v",
     "event_lstm":  "p",
+    "rule_detector": "x",
 }
 TASK_LABELS = {
     "stick_slip":  "Task 1: Stick-Slip",
@@ -314,7 +317,7 @@ def print_latex_table(results: list[dict]) -> None:
     print("="*80)
 
     tasks = sorted(set(e["task"] for e in standard))
-    models_order = ["force_mlp", "vision_only", "force_tcn", "event_tcn"]
+    models_order = ["force_mlp", "vision_only", "force_tcn", "event_tcn", "rule_detector"]
 
     # 表头
     header = f"{'Task':<16} | {'Model':<16} | {'F1':>6} | {'Precision':>9} | {'Recall':>7} | {'Acc':>6}"

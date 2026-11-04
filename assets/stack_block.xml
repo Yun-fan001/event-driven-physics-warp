@@ -24,18 +24,27 @@
       <geom name="platform_geom" type="box" size="0.06 0.06 0.02" rgba="0.3 0.3 0.3 1"/>
     </body>
 
-    <!-- 被抓方块: 初始在 origin -->
-    <body name="block" pos="0 0 0.025">
-      <freejoint name="block_free"/>
+    <!-- 被抓方块: 平面滑块 (x/z 双 slide, 无旋转), 初始在原点 -->
+    <!-- 重设计(缺陷修复): 原 freejoint + 高摩擦圆柱"吸盘"无法产生法向吸附,
+         物块从未被提起(数据目录一直为空)。改为 slide 滑块 + 吸力执行器,
+         运动稳定且吸力物理可解释(真空吸盘模型)。
+         坐标修复: body pos 归零, block_z qpos 即世界高度 -->
+    <body name="block" pos="0 0 0">
+      <joint name="block_x" type="slide" axis="1 0 0" limited="true" range="-0.06 0.25" damping="2.0"/>
+      <joint name="block_z" type="slide" axis="0 0 1" limited="true" range="0.024 0.20" damping="2.0"/>
       <geom name="block_geom" type="box" size="0.03 0.03 0.025" mass="0.08" rgba="0.9 0.3 0.2 1"/>
       <site name="block_top" pos="0 0 0.025" size="0.005"/>
       <site name="block_center" pos="0 0 0" size="0.005"/>
     </body>
 
     <!-- Gripper (吸盘): 可 x/z 两自由度移动 -->
+    <!-- 坐标修复: gripper 子 body pos 归零, gripper_z qpos 即世界高度 -->
     <body name="gripper_base" pos="0 0 0.0">
+      <!-- 修复(缺陷2): gripper_base 无几何体且无惯性 → MuJoCo 3.15 mjMINVAL 崩溃。
+           显式给出小质量惯性(模拟滑轨滑块) -->
+      <inertial pos="0 0 0.075" mass="0.1" diaginertia="5e-4 5e-4 5e-4"/>
       <joint name="gripper_x" type="slide" axis="1 0 0" limited="true" range="-0.05 0.20" damping="2.0"/>
-      <body name="gripper" pos="0 0 0.15">
+      <body name="gripper" pos="0 0 0">
         <joint name="gripper_z" type="slide" axis="0 0 1" limited="true" range="0.04 0.20" damping="3.0"/>
         <geom name="gripper_geom" type="cylinder" size="0.035 0.008" mass="0.3" rgba="0.2 0.4 0.9 1"/>
         <site name="gripper_tip" pos="0 0 -0.008" size="0.005"/>
@@ -48,6 +57,8 @@
   <actuator>
     <position name="gripper_x_pos" joint="gripper_x" kp="2000" kv="200" ctrlrange="-0.05 0.20"/>
     <position name="gripper_z_pos" joint="gripper_z" kp="2000" kv="200" ctrlrange="0.04 0.20"/>
+    <!-- 吸力执行器: 对 block_z 直接施加力 (ctrl=力值, 模拟真空吸盘) -->
+    <general name="suction" joint="block_z" gaintype="fixed" ctrlrange="-100 100"/>
   </actuator>
 
   <sensor>

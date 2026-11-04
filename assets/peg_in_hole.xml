@@ -27,8 +27,12 @@
       <geom name="wall_w" type="box" size="0.005 0.06 0.04" pos="-0.065 0 0.045" rgba="0.5 0.5 0.5 1"/>
     </body>
 
-    <!-- Peg: 圆柱，直接由 z 轴 slide 控制，模拟末端执行器 -->
-    <body name="peg" pos="0 0 0.15">
+    <!-- Peg: 圆柱，x/y 侧向偏移 + z 轴 slide 控制，模拟末端执行器 -->
+    <!-- 坐标修复: body pos 归零, slide 关节 qpos 即世界坐标
+         (原 body pos=0.15 叠加 qpos 导致 peg 实际悬浮在 z=0.18~0.30, 从未接触 socket) -->
+    <body name="peg" pos="0 0 0">
+      <joint name="peg_x" type="slide" axis="1 0 0" limited="true" range="-0.005 0.005" damping="1.0"/>
+      <joint name="peg_y" type="slide" axis="0 1 0" limited="true" range="-0.005 0.005" damping="1.0"/>
       <joint name="peg_z" type="slide" axis="0 0 1" limited="true" range="0.02 0.2" damping="1.0"/>
       <geom name="peg_geom" type="cylinder" size="0.025 0.05" mass="0.5" rgba="0.9 0.3 0.2 1"/>
       <site name="peg_tip" pos="0 0 -0.05" size="0.005"/>
@@ -38,12 +42,18 @@
   </worldbody>
 
   <actuator>
-    <position name="peg_pos" joint="peg_z" kp="2000" kv="200" ctrlrange="0.02 0.2"/>
+    <!-- kp 由 2000 降至 300(缺陷1修复): 接触后伺服误差产生的弹簧力过大，
+         300×0.015m(目标下限0.05与接触位0.06之差) ≈ 4.5N，量级合理 -->
+    <position name="peg_x_pos" joint="peg_x" kp="100" kv="20" ctrlrange="-0.005 0.005"/>
+    <position name="peg_y_pos" joint="peg_y" kp="100" kv="20" ctrlrange="-0.005 0.005"/>
+    <position name="peg_z_pos" joint="peg_z" kp="300" kv="30" ctrlrange="0.02 0.2"/>
   </actuator>
 
   <sensor>
     <framepos name="peg_pos" objtype="site" objname="peg_tip"/>
     <framelinvel name="peg_vel" objtype="site" objname="peg_tip"/>
     <force name="peg_force" site="peg_tip"/>
+    <!-- GT 接触判据: 几何真值(touch传感器)，与力信号解耦 -->
+    <touch name="peg_touch" site="peg_tip"/>
   </sensor>
 </mujoco>

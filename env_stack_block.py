@@ -25,12 +25,15 @@ class ContactState(IntEnum):
 
 @dataclass
 class EpisodeConfig:
-    max_steps: int = 600          # 抓取-平移-放置需要更多步数
-    move_speed: float = 0.0008    # 每步移动距离 (m/step)
+    max_steps: int = 1200         # 抓取-平移-放置需要更多步数 (慢速 0.2 m/s)
+    move_speed: float = 0.0004    # 每步移动距离 (m/step) = 0.2 m/s
     image_width: int = 128
     image_height: int = 128
-    grip_force_threshold: float = 2.0   # 判定"夹住"的力阈值 (N)
+    grip_force_threshold: float = 2.0   # 自动标注用的力阈值参考 (GT 不再使用)
     release_height: float = 0.12        # 提起后保持的高度
+    place_height: float = 0.098         # 放置下降停止高度 (物块落平台后 gripper 停止, 避免压穿)
+    suction_force: float = 1.5          # 吸盘吸力 (N), 作用于 block_z, 模拟真空吸盘
+                                        # (块重 0.08kg×9.81≈0.78N, 1.5N 有足够裕量且不过冲)
 
 
 class StackBlockEnv(gym.Env):
@@ -78,13 +81,16 @@ class StackBlockEnv(gym.Env):
         self._rng = np.random.default_rng(seed)
 
         # 预计算地址
-        self._force_adr = self.model.sensor("gripper_force").adr[0]
         self._vel_adr = self.model.sensor("block_vel").adr[0]
         self._block_pos_adr = self.model.sensor("block_pos").adr[0]
         self._gripper_x_act = self.model.actuator("gripper_x_pos").id
         self._gripper_z_act = self.model.actuator("gripper_z_pos").id
+        self._suction_act = self.model.actuator("suction").id
         self._gripper_x_qpos = self.model.joint("gripper_x").qposadr[0]
         self._gripper_z_qpos = self.model.joint("gripper_z").qposadr[0]
+        self._block_x_qpos = self.model.joint("block_x").qposadr[0]
+        self._block_z_qpos = self.model.joint("block_z").qposadr[0]
+        self._gripper_geom_id = self.model.geom("gripper_geom").id
 
         # 目标位置
         self._gripper_target_x = 0.0
@@ -98,18 +104,13 @@ class StackBlockEnv(gym.Env):
         mujoco.mj_resetData(self.model, self.data)
 
         friction_scale = options.get("friction_scale", 1.0) if options else 1.0
-        # 随机化摩擦，影响"吸起"成功率
+        # 随机化摩擦
         self.model.geom("gripper_geom").friction[0] = 1.5 * friction_scale
         self.model.geom("block_geom").friction[0] = 1.5 * friction_scale
 
-        # 重置方块位置和姿态（轻微随机扰动，增加多样性）
-        block_qpos = self.model.joint("block_free").qposadr[0]
-        self.data.qpos[block_qpos : block_qpos + 3] = [
-            self._rng.uniform(-0.01, 0.01),
-            self._rng.uniform(-0.01, 0.01),
-            0.025,
-        ]
-        self.data.qpos[block_qpos + 3 : block_qpos + 7] = [1.0, 0.0, 0.0, 0.0]  # 四元数
+        # 重置方块 (x/z 滑块, 轻微位置扰动)
+        self.data.qpos[self._block_x_qpos] = float(self._rng.uniform(-0.01, 0.01))
+        self.data.qpos[self._block_z_qpos] = 0.025
         self.data.qvel[:] = 0.0
 
         # 重置 gripper
@@ -168,8 +169,9 @@ class StackBlockEnv(gym.Env):
                 self._phase_counter = 0
 
         elif self._phase == 4:
+            # 下降到放置高度: 物块落在平台(block_z=0.065)时 gripper 尖端在 0.065+0.033=0.098
             self._gripper_target_z = np.clip(self._gripper_target_z - delta, 0.055, 0.20)
-            if self._gripper_target_z <= 0.065:
+            if self._gripper_target_z <= self.config.place_height:
                 self._phase = 5
                 self._phase_counter = 0
 
@@ -178,6 +180,12 @@ class StackBlockEnv(gym.Env):
 
         self.data.ctrl[self._gripper_x_act] = self._gripper_target_x
         self.data.ctrl[self._gripper_z_act] = self._gripper_target_z
+        # 吸力执行器: Phase 1~4 抓取保持期间开启 (模拟真空吸盘),
+        # Phase 0 未接触 / Phase 5 已释放 时关闭。
+        if self._phase in (1, 2, 3, 4):
+            self.data.ctrl[self._suction_act] = self.config.suction_force
+        else:
+            self.data.ctrl[self._suction_act] = 0.0
 
         mujoco.mj_step(self.model, self.data)
 
@@ -197,7 +205,19 @@ class StackBlockEnv(gym.Env):
         return self.renderer.render()
 
     def _get_gripper_force(self) -> np.ndarray:
-        return self.data.sensordata[self._force_adr : self._force_adr + 3].copy()
+        """真实接触力 (世界系, 3维): data.contact + mj_contactForce。
+
+        修复(缺陷1): 原 <force> 传感器测的是 body 与父级约束力
+        (= 自重 + 位置伺服弹簧力), 非接触力。
+        """
+        f = np.zeros(3)
+        for i in range(self.data.ncon):
+            c = self.data.contact[i]
+            if c.geom1 == self._gripper_geom_id or c.geom2 == self._gripper_geom_id:
+                tmp = np.zeros(6)
+                mujoco.mj_contactForce(self.model, self.data, i, tmp)
+                f += tmp[:3]
+        return f.astype(np.float32)
 
     def _get_block_velocity(self) -> np.ndarray:
         return self.data.sensordata[self._vel_adr : self._vel_adr + 3].copy()
@@ -206,38 +226,30 @@ class StackBlockEnv(gym.Env):
         return self.data.sensordata[self._block_pos_adr : self._block_pos_adr + 3].copy()
 
     # ============================================================
-    # 接触状态判定 —— 论文 Ground Truth
-    # 混合策略: 以阶段状态机为主，物理量为辅
-    #   NO_CONTACT: 初始等待阶段 (phase 0 早期) 或 最终释放后 (phase 5 且 gripper 已远离)
-    #   CONTACT_GRIP: phase 1~3 (压紧、提起、平移)
-    #   CONTACT_RELEASE: phase 4~5 且方块已接近目标平台
+    # 接触状态判定 —— 论文 Ground Truth (缺陷修复: 与控制器状态机完全解耦)
+    # 纯运动学真值 (带 10mm 死区防抖动):
+    #   GRIP    = gripper 尖端触及物块顶面 (gz < block_z + 0.035)
+    #   RELEASE = 物块在目标平台 (|x-0.15|<0.03 且 block_z<0.07) 且 gripper 已明显离开
+    #             (gz > block_z + 0.045, 尖端高于顶面 12mm)
+    #   NO_CONTACT = 其他 (含死区: 尖端在顶面上方 2mm~12mm 之间的过渡)
+    # 不再依赖 _phase / force / gripper_force 阈值
     # ============================================================
     def _get_contact_state(self) -> ContactState:
-        force = self._get_gripper_force()
-        force_mag = np.linalg.norm(force)
         block_pos = self._get_block_position()
-        block_z = block_pos[2]
-        gripper_z = self.data.qpos[self._gripper_z_qpos]
+        block_z = float(block_pos[2])
+        block_x = float(block_pos[0])
+        gripper_z = float(self.data.qpos[self._gripper_z_qpos])
 
-        # Phase 1~3: 压紧、提起、平移 → 必定为 GRIP
-        if self._phase in (1, 2, 3):
-            return ContactState.CONTACT_GRIP
+        # gripper 尖端 z = gripper_z - 0.008; 物块顶面 z = block_z + 0.025
+        # 触及 = 尖端低于顶面+2mm → gripper_z < block_z + 0.035
+        is_gripped = gripper_z < block_z + 0.035
 
-        # Phase 4~5: 下降放置 / 上升离开
-        if self._phase in (4, 5):
-            # 如果 gripper 已上升到足够高，且方块在平台附近 → RELEASE
-            if gripper_z > 0.10 and block_z < 0.06 and abs(block_pos[0] - 0.15) < 0.05:
-                return ContactState.CONTACT_RELEASE
-            # 否则仍在放置过程中，视为 GRIP
-            if force_mag > self.config.grip_force_threshold:
-                return ContactState.CONTACT_GRIP
+        on_target = (abs(block_x - 0.15) < 0.03) and (block_z < 0.07)
+
+        if on_target and (gripper_z > block_z + 0.045):
             return ContactState.CONTACT_RELEASE
-
-        # Phase 0: 下降中
-        if force_mag > self.config.grip_force_threshold and block_z > 0.04:
-            # 已经产生足够接触力，提前视为 GRIP
+        if is_gripped:
             return ContactState.CONTACT_GRIP
-
         return ContactState.NO_CONTACT
 
     def _get_obs(self) -> np.ndarray:

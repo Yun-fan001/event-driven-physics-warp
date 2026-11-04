@@ -1,11 +1,14 @@
 """
-Step 1 验收脚本 
-核心功能: 
+Step 1 验收脚本 (重规划版: 路径参数化 + 事件召回率验收)
+核心功能:
   1. (参考) 计算帧级状态准确率
-  2. (核心) 计算 Stick→Slip 事件召回率 —— 验证“力跳变+速度跳变”双重条件是否卡准突变时刻
+  2. (核心) 计算 Stick→Slip 事件召回率 —— 验证自动标注卡准突变时刻
 验收标准: 平均事件召回率 >= 0.99 (允许 ±5 帧误差)
+
+用法: python validate_step1.py --data-dir data/seed
 """
 
+import argparse
 from pathlib import Path
 import numpy as np
 
@@ -44,9 +47,13 @@ def compute_event_recall(gt_states, slip_events, tolerance=5):
 
 
 def main():
-    files = sorted(Path("data/seed").glob("traj_*.npz"))
+    parser = argparse.ArgumentParser(description="Step 1 validation")
+    parser.add_argument("--data-dir", type=str, default="data/seed")
+    args = parser.parse_args()
+
+    files = sorted(Path(args.data_dir).glob("traj_*.npz"))
     if len(files) == 0:
-        print("❌ 错误: 未找到轨迹文件，请先运行 collect_seed_data.py")
+        print(f"[ERROR] no trajectory files found in {args.data_dir}, run collect_seed_data.py first")
         return
 
     frame_accs = []          # 帧级准确率 (参考)
@@ -79,35 +86,34 @@ def main():
             failed_trajs.append((idx, f.name, recall, gt_cnt, match_cnt))
 
     # --- 输出 ---
-    print("\n📊 [参考指标] 帧级状态准确率 (旧标准):")
-    print(f"   平均: {np.mean(frame_accs):.4f} ({np.mean(frame_accs)*100:.2f}%)")
-    print(f"   最低: {np.min(frame_accs):.4f} ({np.min(frame_accs)*100:.2f}%)")
-    
-    print("\n🎯 [核心指标] Stick→Slip 事件召回率 (基于力跳变+速度跳变双重条件):")
-    print(f"   总真值事件数: {total_gt_events}")
-    print(f"   成功匹配事件数: {total_matched}")
-    print(f"   平均召回率: {np.mean(event_recalls):.4f} ({np.mean(event_recalls)*100:.2f}%)")
-    print(f"   最低召回率: {np.min(event_recalls):.4f} ({np.min(event_recalls)*100:.2f}%)")
-    
+    print("\n[REF] frame-level state accuracy (legacy metric):")
+    print(f"   mean: {np.mean(frame_accs):.4f} ({np.mean(frame_accs)*100:.2f}%)")
+    print(f"   min : {np.min(frame_accs):.4f} ({np.min(frame_accs)*100:.2f}%)")
+
+    print("\n[CORE] Stick->Slip event recall (force+velocity double condition):")
+    print(f"   total GT events: {total_gt_events}")
+    print(f"   matched events : {total_matched}")
+    print(f"   mean recall: {np.mean(event_recalls):.4f} ({np.mean(event_recalls)*100:.2f}%)")
+    print(f"   min  recall: {np.min(event_recalls):.4f} ({np.min(event_recalls)*100:.2f}%)")
+
     # --- 验收 ---
     avg_recall = np.mean(event_recalls)
     print("\n" + "=" * 60)
-    
+
     if avg_recall >= 0.99:
-        print("✅ Step 1 验收通过！")
-        print("   核心依据: 平均事件召回率 ≥ 99%，算法能精准捕获滑动突变时刻。")
+        print("[PASS] Step 1 validation passed: mean event recall >= 99%")
         if np.min(frame_accs) < 0.98:
-            print("   ⚠️ 提示: 帧级准确率虽未达98%，但事件召回率达标，说明状态分类略有延迟但不影响事件检测。")
+            print("  [NOTE] frame acc below 98% but event recall OK (state classification lag only)")
     else:
-        print("⚠️  Step 1 验收未通过: 事件召回率不足 99%。")
-        print("   建议: 调小 event_annotation.py 中的 force_delta_threshold（让力跳变更敏感）")
-        print("        或调大 tolerance 容差（当前为5帧，即10ms）。")
-    
+        print("[FAIL] Step 1 validation failed: event recall < 99%.")
+        print("  suggestions: lower force_delta_threshold in event_annotation.py")
+        print("               or increase tolerance (current 5 frames = 10ms).")
+
     if failed_trajs:
-        print("\n🔍 未完全通过的事件检测轨迹 (召回率 < 1.0):")
+        print("\n[INFO] trajectories with recall < 1.0:")
         for idx, name, recall, gt_cnt, match_cnt in failed_trajs:
-            print(f"   - 文件 {name} (索引 {idx}): 召回率 {recall:.2f} ({match_cnt}/{gt_cnt})")
-        print("   💡 请运行 visualize_trajectory.py 查看这些轨迹的力-速度曲线，调整阈值。")
+            print(f"   - {name} (idx {idx}): recall {recall:.2f} ({match_cnt}/{gt_cnt})")
+        print("  [TIP] run visualize_trajectory.py on these trajectories and tune thresholds.")
 
 if __name__ == "__main__":
     main()

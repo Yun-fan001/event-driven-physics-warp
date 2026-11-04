@@ -214,16 +214,17 @@ def main():
                 "release_events": episode["release_events"],
             })
 
-        np.savez_compressed(out_dir / f"traj_{i:04d}.npz", **save_dict)
+        # 文件名用 seed 命名 (可复现且多次采集不互相覆盖)
+        np.savez_compressed(out_dir / f"traj_{seed:04d}.npz", **save_dict)
         all_acc.append(episode["metrics"]["state_accuracy"])
 
     env.close()
 
-    print(f"\n✅ {args.task}: 已保存 {args.num_episodes} 条轨迹到 {out_dir}")
-    print(f"平均自动标注精度: {np.mean(all_acc):.4f}")
-    print(f"最低自动标注精度: {np.min(all_acc):.4f}")
+    print(f"\n[OK] {args.task}: saved {args.num_episodes} trajectories to {out_dir}")
+    print(f"mean annotation accuracy: {np.mean(all_acc):.4f}")
+    print(f"min  annotation accuracy: {np.min(all_acc):.4f}")
     if np.min(all_acc) < 0.98:
-        print("⚠️ 警告: 部分轨迹标注精度低于 98%，请调整阈值后重试")
+        print("[WARN] some trajectories below 98% annotation accuracy, check thresholds")
 
 
 if __name__ == "__main__":

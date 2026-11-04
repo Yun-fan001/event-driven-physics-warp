@@ -34,8 +34,8 @@ def vis_stick_slip(data: dict, output: str) -> None:
 
     axes[1].plot(t, vx, label="v_x", color="green", linewidth=1.5)
     axes[1].axhline(0.0, color="k", linewidth=0.8, linestyle="-")
-    axes[1].axhline(0.01, color="orange", linewidth=0.8, linestyle="--", alpha=0.5, label="stick_thresh=0.01")
-    axes[1].axhline(0.02, color="red", linewidth=0.8, linestyle="--", alpha=0.5, label="slip_thresh=0.02")
+    axes[1].axhline(0.008, color="orange", linewidth=0.8, linestyle="--", alpha=0.5, label="stick_thresh=0.008")
+    axes[1].axhline(0.012, color="red", linewidth=0.8, linestyle="--", alpha=0.5, label="slip_thresh=0.012")
     axes[1].set_ylabel("Velocity (m/s)", fontsize=11)
     axes[1].legend(loc="upper left")
     axes[1].grid(True, alpha=0.3)
