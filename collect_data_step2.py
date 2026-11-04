@@ -26,18 +26,24 @@ from event_annotation_v2 import (
 
 # ============================================================
 # 各任务采集函数
+# render_interval: 每 N 步渲染一帧 (视觉帧保持), 默认 5 → 视觉等效 100 Hz。
+#   对应"多速率视觉-触觉操作"设定 (实机相机 30-100Hz, 力传感器 500Hz),
+#   并将采集提速 N 倍。渲染帧在保存时按 N 重复, 与力序列等长对齐。
 # ============================================================
-def collect_stick_slip(env: StickSlipEnv, seed: int, friction_scale: float) -> dict:
+def collect_stick_slip(env: StickSlipEnv, seed: int, friction_scale: float,
+                       render_interval: int = 5) -> dict:
     obs, info = env.reset(seed=seed, options={"friction_scale": friction_scale})
 
     frames, forces, velocities, gt_states, pusher_x = [], [], [], [], []
     action = np.array([1.0], dtype=np.float32)
 
     done = False
+    step_i = 0
     while not done:
-        frame = env.render()
-        if frame is not None:
-            frames.append(frame)
+        if step_i % render_interval == 0:
+            frame = env.render()
+            if frame is not None:
+                frames.append(frame)
         forces.append(info["force"])
         velocities.append(info["velocity"])
         gt_states.append(info["contact_state"])
@@ -45,6 +51,11 @@ def collect_stick_slip(env: StickSlipEnv, seed: int, friction_scale: float) -> d
 
         obs, reward, terminated, truncated, info = env.step(action)
         done = terminated or truncated
+        step_i += 1
+
+    # 仅保存实际渲染帧 (ceil(T/ri) 帧), dataset.py 加载时按 render_interval 展开
+    # (提速: 免去 5x 帧重复的压缩/IO 开销)
+    frames = np.stack(frames).astype(np.uint8)
 
     force_xy = np.stack(forces)[:, :2]
     vel_x = np.stack(velocities)[:, 0]
@@ -53,7 +64,7 @@ def collect_stick_slip(env: StickSlipEnv, seed: int, friction_scale: float) -> d
     metrics = compare_with_ground_truth(pred_states, gt_states_arr)
 
     return {
-        "frames": np.stack(frames).astype(np.uint8),
+        "frames": frames,
         "forces": np.stack(forces).astype(np.float32),
         "velocities": np.stack(velocities).astype(np.float32),
         "pusher_x": np.array(pusher_x, dtype=np.float32),
@@ -63,20 +74,24 @@ def collect_stick_slip(env: StickSlipEnv, seed: int, friction_scale: float) -> d
         "metrics": metrics,
         "seed": seed,
         "friction_scale": friction_scale,
+        "render_interval": render_interval,
     }
 
 
-def collect_peg_in_hole(env: PegInHoleEnv, seed: int, friction_scale: float) -> dict:
+def collect_peg_in_hole(env: PegInHoleEnv, seed: int, friction_scale: float,
+                        render_interval: int = 5) -> dict:
     obs, info = env.reset(seed=seed, options={"friction_scale": friction_scale})
 
     frames, forces, velocities, gt_states, peg_z = [], [], [], [], []
     action = np.array([1.0], dtype=np.float32)  # 最大速度插入
 
     done = False
+    step_i = 0
     while not done:
-        frame = env.render()
-        if frame is not None:
-            frames.append(frame)
+        if step_i % render_interval == 0:
+            frame = env.render()
+            if frame is not None:
+                frames.append(frame)
         forces.append(info["force"])
         velocities.append(info["velocity"])
         gt_states.append(info["contact_state"])
@@ -84,6 +99,10 @@ def collect_peg_in_hole(env: PegInHoleEnv, seed: int, friction_scale: float) -> 
 
         obs, reward, terminated, truncated, info = env.step(action)
         done = terminated or truncated
+        step_i += 1
+
+    # 仅保存实际渲染帧, dataset.py 加载时展开
+    frames = np.stack(frames).astype(np.uint8)
 
     force = np.stack(forces)
     pred_states, contact_events = annotate_peg_in_hole(force)
@@ -91,7 +110,7 @@ def collect_peg_in_hole(env: PegInHoleEnv, seed: int, friction_scale: float) -> 
     metrics = compare_with_ground_truth(pred_states, gt_states_arr)
 
     return {
-        "frames": np.stack(frames).astype(np.uint8),
+        "frames": frames,
         "forces": force.astype(np.float32),
         "velocities": np.stack(velocities).astype(np.float32),
         "peg_z": np.array(peg_z, dtype=np.float32),
@@ -101,10 +120,12 @@ def collect_peg_in_hole(env: PegInHoleEnv, seed: int, friction_scale: float) -> 
         "metrics": metrics,
         "seed": seed,
         "friction_scale": friction_scale,
+        "render_interval": render_interval,
     }
 
 
-def collect_stack_block(env: StackBlockEnv, seed: int, friction_scale: float) -> dict:
+def collect_stack_block(env: StackBlockEnv, seed: int, friction_scale: float,
+                        render_interval: int = 5) -> dict:
     obs, info = env.reset(seed=seed, options={"friction_scale": friction_scale})
 
     frames, forces, velocities, gt_states = [], [], [], []
@@ -113,10 +134,12 @@ def collect_stack_block(env: StackBlockEnv, seed: int, friction_scale: float) ->
     action = np.array([1.0], dtype=np.float32)
 
     done = False
+    step_i = 0
     while not done:
-        frame = env.render()
-        if frame is not None:
-            frames.append(frame)
+        if step_i % render_interval == 0:
+            frame = env.render()
+            if frame is not None:
+                frames.append(frame)
         forces.append(info["force"])
         velocities.append(info["velocity"])
         gt_states.append(info["contact_state"])
@@ -126,6 +149,10 @@ def collect_stack_block(env: StackBlockEnv, seed: int, friction_scale: float) ->
 
         obs, reward, terminated, truncated, info = env.step(action)
         done = terminated or truncated
+        step_i += 1
+
+    # 仅保存实际渲染帧, dataset.py 加载时展开
+    frames = np.stack(frames).astype(np.uint8)
 
     force = np.stack(forces)
     gz = np.array(gripper_z, dtype=np.float32)
@@ -136,7 +163,7 @@ def collect_stack_block(env: StackBlockEnv, seed: int, friction_scale: float) ->
     metrics = compare_with_ground_truth(pred_states, gt_states_arr)
 
     return {
-        "frames": np.stack(frames).astype(np.uint8),
+        "frames": frames,
         "forces": force.astype(np.float32),
         "velocities": np.stack(velocities).astype(np.float32),
         "gripper_x": np.array(gripper_x, dtype=np.float32),
@@ -149,6 +176,7 @@ def collect_stack_block(env: StackBlockEnv, seed: int, friction_scale: float) ->
         "metrics": metrics,
         "seed": seed,
         "friction_scale": friction_scale,
+        "render_interval": render_interval,
     }
 
 
@@ -168,6 +196,8 @@ def main():
     parser.add_argument("--num-episodes", type=int, default=200)
     parser.add_argument("--output-dir", type=str, required=True)
     parser.add_argument("--seed-start", type=int, default=0)
+    parser.add_argument("--render-interval", type=int, default=5,
+                        help="每 N 步渲染一帧(视觉帧保持), 视觉等效 500/N Hz; 采集提速 N 倍")
     args = parser.parse_args()
 
     EnvClass, ConfigClass, collect_fn = TASK_MAP[args.task]
@@ -177,11 +207,12 @@ def main():
     env = EnvClass(config=ConfigClass())
     all_acc = []
 
-    for i in tqdm(range(args.num_episodes), desc=f"采集 {args.task}"):
+    for i in tqdm(range(args.num_episodes), desc=f"collect {args.task}"):
         seed = args.seed_start + i
-        rng = np.random.default_rng(seed)  # ✅ 用当前种子生成独立随机数生成器
+        rng = np.random.default_rng(seed)  # 用当前种子生成独立随机数生成器
         friction_scale = rng.uniform(0.7, 1.3)
-        episode = collect_fn(env, seed=seed, friction_scale=friction_scale)
+        episode = collect_fn(env, seed=seed, friction_scale=friction_scale,
+                             render_interval=args.render_interval)
 
         # 根据任务保存不同字段
         save_dict = {
@@ -192,6 +223,7 @@ def main():
             "contact_states_auto": episode["contact_states_auto"],
             "seed": episode["seed"],
             "friction_scale": episode["friction_scale"],
+            "render_interval": episode["render_interval"],
             "metrics_accuracy": episode["metrics"]["state_accuracy"],
         }
 

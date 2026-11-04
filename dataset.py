@@ -37,6 +37,7 @@ class ContactEventDataset(Dataset):
         task: str,
         transform: Callable | None = None,
         seq_len: int | None = None,  # 若指定，统一截断/填充到该长度
+        cache: bool = True,           # 预加载全部 npz 到内存 (200条x3.5MB≈700MB), 大幅加速训练
     ):
         super().__init__()
         self.task = task
@@ -49,16 +50,27 @@ class ContactEventDataset(Dataset):
         if len(self.files) == 0:
             raise ValueError(f"在 {data_dir} 中未找到 .npz 文件")
 
+        self._cache = {}
+        if cache:
+            for f in self.files:
+                self._cache[str(f)] = np.load(f)
+            print(f"[Dataset] {task}: cached {len(self.files)} trajectories in memory")
+
         print(f"[Dataset] {task}: 加载 {len(self.files)} 条轨迹")
 
     def __len__(self) -> int:
         return len(self.files)
 
     def __getitem__(self, idx: int) -> dict[str, torch.Tensor]:
-        d = np.load(self.files[idx])
+        d = self._cache.get(str(self.files[idx]))
+        if d is None:
+            d = np.load(self.files[idx])
 
-        # 视觉帧: (T, H, W, 3) uint8 → (T, 3, H, W) float32 [0,1]
+        # 视觉帧: (T', H, W, 3) uint8 → 按 render_interval 展开 → (T, 3, H, W) float32 [0,1]
         frames = d["frames"].astype(np.float32) / 255.0
+        ri = int(d.get("render_interval", 1))
+        if ri > 1 and frames.shape[0] < d["forces"].shape[0]:
+            frames = np.repeat(frames, ri, axis=0)[: d["forces"].shape[0]]
         frames = np.transpose(frames, (0, 3, 1, 2))  # T,H,W,C → T,C,H,W
 
         forces = d["forces"].astype(np.float32)

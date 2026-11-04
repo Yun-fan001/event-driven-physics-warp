@@ -484,6 +484,9 @@ def main():
     model = ModelWrapper(args.model, args.task).to(device)
 
     output_dir = Path(args.output_dir) / args.task / args.model
+    # 数据效率实验写入 frac_ 子目录 (plot 脚本按此筛选)
+    if args.data_fraction < 1.0:
+        output_dir = output_dir / f"frac_{args.data_fraction}"
     # 若开启噪声实验则写入子目录
     if args.force_noise_std > 0 or abs(args.time_shift_ms) > 1e-6:
         output_dir = output_dir / f"noise_f{args.force_noise_std}_t{args.time_shift_ms:.0f}ms"
