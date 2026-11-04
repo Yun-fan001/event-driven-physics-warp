@@ -354,6 +354,7 @@ def eval_epoch(
     device: torch.device,
     ignore_index: int = -100,
     force_noise_std: float = 0.0,
+    time_shift_ms: float = 0.0,
 ):
     model.eval()
     total_loss = 0.0
@@ -368,6 +369,12 @@ def eval_epoch(
         velocity = batch["velocity"].to(device)
         proprio = batch["proprio"].to(device)
         labels = batch["label"].to(device)
+
+        # 时间偏移: 评估时同样破坏视觉-力觉对齐 (force_mlp/rule_detector 不用视觉, 天然免疫)
+        vision, force, proprio, labels = add_time_shift(
+            vision, force, proprio, labels, time_shift_ms,
+            seq_len=vision.shape[1],
+        )
 
         if model.model_name == "rule_detector":
             # 零训练基线: 对原始 力+速度 应用手调阈值规则 (自动标注器本身)
@@ -484,6 +491,9 @@ def main():
     model = ModelWrapper(args.model, args.task).to(device)
 
     output_dir = Path(args.output_dir) / args.task / args.model
+    # 多种子实验: 非默认 seed 写入 seed_ 子目录 (避免覆盖)
+    if args.seed != 42:
+        output_dir = output_dir / f"seed_{args.seed}"
     # 数据效率实验写入 frac_ 子目录 (plot 脚本按此筛选)
     if args.data_fraction < 1.0:
         output_dir = output_dir / f"frac_{args.data_fraction}"
@@ -496,7 +506,8 @@ def main():
         # 零训练基线: 无参数, 跳过训练循环, 直接评估
         print("[rule_detector] zero-training baseline, skip training loop")
         test_metrics = eval_epoch(model, test_loader, device,
-                                  force_noise_std=args.force_noise_std)
+                                  force_noise_std=args.force_noise_std,
+                                  time_shift_ms=args.time_shift_ms)
         print(f"\n[TEST] Acc={test_metrics['accuracy']:.4f}, "
               f"F1={test_metrics['f1']:.4f}, "
               f"P={test_metrics['precision']:.4f}, "
@@ -520,7 +531,8 @@ def main():
             time_shift_ms=args.time_shift_ms,
         )
         val_metrics = eval_epoch(model, val_loader, device,
-                                 force_noise_std=args.force_noise_std)
+                                 force_noise_std=args.force_noise_std,
+                                 time_shift_ms=args.time_shift_ms)
         scheduler.step()
 
         print(f"Train Loss: {train_loss:.4f} | Train Acc: {train_acc:.4f}")
@@ -550,7 +562,8 @@ def main():
     checkpoint = torch.load(output_dir / "best.pt")
     model.load_state_dict(checkpoint["model_state_dict"])
     test_metrics = eval_epoch(model, test_loader, device,
-                              force_noise_std=args.force_noise_std)
+                              force_noise_std=args.force_noise_std,
+                              time_shift_ms=args.time_shift_ms)
     print(f"\n[TEST] Acc={test_metrics['accuracy']:.4f}, "
           f"F1={test_metrics['f1']:.4f}, "
           f"P={test_metrics['precision']:.4f}, "
