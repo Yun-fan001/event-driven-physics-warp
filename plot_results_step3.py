@@ -97,7 +97,7 @@ def filter_standard(results: list[dict]) -> list[dict]:
 def plot_data_efficiency(results: list[dict], output_dir: Path) -> None:
     data_eff = filter_data_efficiency(results)
     if not data_eff:
-        print("⚠️  无数据效率实验结果，跳过图表 1")
+        print(f"  [skip] no data efficiency results, chart 1 skipped")
         return
 
     # 按任务组织: {task: {model: [(frac, f1), ...]}}
@@ -149,7 +149,7 @@ def plot_data_efficiency(results: list[dict], output_dir: Path) -> None:
     out = output_dir / "data_efficiency.png"
     fig.savefig(out, dpi=200)
     plt.close(fig)
-    print(f"  ✅ 数据效率曲线 -> {out}")
+    print(f"  [saved] data efficiency curve -> {out}")
 
 
 # ============================================================
@@ -160,7 +160,7 @@ def plot_noise_robustness(results: list[dict], output_dir: Path) -> None:
     standard_data = filter_standard(results)
 
     if not noise_data or not standard_data:
-        print("⚠️  无噪声鲁棒性实验结果，跳过图表 2")
+        print("  [skip] no noise robustness results, chart 2 skipped")
         return
 
     # 建立标准结果的基准: {(task, model): baseline_f1}
@@ -230,7 +230,7 @@ def plot_noise_robustness(results: list[dict], output_dir: Path) -> None:
     out = output_dir / "noise_robustness.png"
     fig.savefig(out, dpi=200)
     plt.close(fig)
-    print(f"  ✅ 噪声鲁棒性柱状图 -> {out}")
+    print(f"  [saved] noise robustness chart -> {out}")
 
 
 # ============================================================
@@ -244,7 +244,7 @@ def plot_ablation(results: list[dict], output_dir: Path) -> None:
         standard = [e for e in data_eff if "frac_1.0" in e["condition"]]
 
     if not standard:
-        print("⚠️  无消融实验结果，跳过图表 3")
+        print("  [skip] no ablation results, chart 3 skipped")
         return
 
     # 按任务组织: {task: {model: f1}}
@@ -295,7 +295,7 @@ def plot_ablation(results: list[dict], output_dir: Path) -> None:
     out = output_dir / "ablation.png"
     fig.savefig(out, dpi=200)
     plt.close(fig)
-    print(f"  ✅ 消融柱状图 -> {out}")
+    print(f"  [saved] ablation chart -> {out}")
 
 
 # ============================================================
@@ -309,7 +309,7 @@ def print_latex_table(results: list[dict]) -> None:
         standard = [e for e in data_eff if "frac_1.0" in e["condition"]]
 
     if not standard:
-        print("\n⚠️  无实验数据，无法生成表格")
+        print("\n[skip] no experiment data, table not generated")
         return
 
     print("\n" + "="*80)
@@ -379,27 +379,27 @@ def main():
     args = parser.parse_args()
 
     results = load_results(args.results)
-    print(f"✅ 加载 {len(results)} 条实验结果")
+    print(f"[loaded] {len(results)} experiment results")
 
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
     # 1. 数据效率曲线
-    print("\n📈 图表 1: 数据效率曲线...")
+    print("\n[1] data efficiency curves...")
     plot_data_efficiency(results, output_dir)
 
     # 2. 噪声鲁棒性柱状图
-    print("\n📈 图表 2: 噪声鲁棒性柱状图...")
+    print("\n[2] noise robustness charts...")
     plot_noise_robustness(results, output_dir)
 
     # 3. 消融柱状图
-    print("\n📈 图表 3: 消融对比柱状图...")
+    print("\n[3] ablation charts...")
     plot_ablation(results, output_dir)
 
     # 4. LaTeX 表格
     print_latex_table(results)
 
-    print(f"\n🎉 所有图表已保存到: {output_dir}/")
+    print(f"\n[OK] all charts saved to: {output_dir}/")
 
 
 if __name__ == "__main__":

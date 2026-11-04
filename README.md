@@ -34,11 +34,48 @@ real_robot_adaptation_guide_ros2.txt  实机 ROS2 适配指南
 Set-Location D:\projects\event-driven-physics-warp
 .venv\Scripts\python.exe check_env_v2.py          # 环境检查
 .venv\Scripts\python.exe smoke_env.py             # 三任务物理冒烟
-.venv\Scripts\python.exe collect_data_step2.py --task stick_slip --num-episodes 1 --output-dir data/test/stick_slip
-.venv\Scripts\python.exe annotation_report.py --task all --data-dir data/test
+.venv\Scripts\python.exe collect_data_step2.py --task stick_slip --num-episodes 200 --output-dir data/stick_slip --render-interval 5
+.venv\Scripts\python.exe annotation_report.py --task all --data-dir data
+.venv\Scripts\python.exe train_step2.py --task stick_slip --model event_tcn --data-dir data/stick_slip --epochs 30
 ```
 
 详见 guide.txt。
+
+## 数据集 (已采集, 2026-11-05)
+
+- 3 任务 × 200 条 = 600 条轨迹, 全部通过完整性扫描
+- render-interval=5: 视觉等效 100 Hz 帧保持 (力 500 Hz), 采集提速 ~15x
+- 标注质量报告 (`data/annotation_report_all.json`):
+  - stick_slip: 帧准确率 0.966, 事件 F1=0.819 (P=0.803/R=0.835), 时间误差中位数 1 帧
+  - peg_in_hole: 帧准确率 0.991, 事件 F1=1.000, 时间误差中位数 3 帧
+  - stack_block: 帧准确率 0.983, 事件 F1=0.516 (R=1.000), 时间误差中位数 1 帧
+
+## 实验结果 (stick_slip, 200 条轨迹, 30 epochs, seed 42)
+
+| 模型 | F1 | Precision | Recall |
+|---|---|---|---|
+| Force-MLP @100% (连续力回归基线) | 0.404 | 0.363 | 0.546 |
+| Vision-Only @100% | 0.237 | 0.184 | 0.333 |
+| Force-TCN @100% (力觉-only 消融) | **0.963** | 0.978 | 0.949 |
+| Event-TCN @100% (多模态主模型) | 0.929 | 0.979 | 0.897 |
+| Event-TCN @50% | 0.941 | 0.943 | 0.939 |
+| Event-TCN @10% | 0.636 | 0.680 | 0.619 |
+| RuleDetector (零训练手调阈值) | 0.874 | 0.948 | 0.835 |
+
+**主线验收标准: Event-TCN@50% (0.941) ≥ Force-MLP@100% (0.404) ✓ (2.3× 余量)**
+
+核心发现 (H1 支持):
+- 事件分类学习远超连续力回归 (0.93+ vs 0.40)
+- 数据效率: Event-TCN@50% ≈ @100%, 均超 RuleDetector
+- 力觉是主导模态 (Force-TCN 0.963 ≈ Event-TCN 0.929);
+  128×128 侧视图+帧保持下视觉未增益 (论文消融讨论点)
+- 图表: `figures/data_efficiency.png`, `figures/ablation.png`; LaTeX 表见 plot 输出
+
+后续 (按规划):
+1. 噪声鲁棒性 + 时间偏移实验 (train_step2.py --force-noise-std / --time-shift-ms)
+2. peg_in_hole / stack_block 全模型矩阵
+3. 3 随机种子
+4. Isaac Lab 跨引擎 (12 月) → 实机 (寒假)
 
 ## 2026-11 修复摘要 (7 项缺陷)
 
