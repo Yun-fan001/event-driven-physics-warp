@@ -53,7 +53,9 @@ class ContactEventDataset(Dataset):
         self._cache = {}
         if cache:
             for f in self.files:
-                self._cache[str(f)] = np.load(f)
+                with np.load(f) as d:
+                    # 复制为纯 ndarray 并关闭文件句柄 (可 pickle, 避免 spawn 失败)
+                    self._cache[str(f)] = {k: d[k] for k in d.files}
             print(f"[Dataset] {task}: cached {len(self.files)} trajectories in memory")
 
         print(f"[Dataset] {task}: 加载 {len(self.files)} 条轨迹")
@@ -66,58 +68,64 @@ class ContactEventDataset(Dataset):
         if d is None:
             d = np.load(self.files[idx])
 
-        # 视觉帧: (T', H, W, 3) uint8 → 按 render_interval 展开 → (T, 3, H, W) float32 [0,1]
-        frames = d["frames"].astype(np.float32) / 255.0
+        frames_raw = d["frames"]                     # (Traw, H, W, 3) uint8
         ri = int(d.get("render_interval", 1))
-        if ri > 1 and frames.shape[0] < d["forces"].shape[0]:
-            frames = np.repeat(frames, ri, axis=0)[: d["forces"].shape[0]]
-        frames = np.transpose(frames, (0, 3, 1, 2))  # T,H,W,C → T,C,H,W
-
         forces = d["forces"].astype(np.float32)
         velocities = d["velocities"].astype(np.float32)
         states = d["contact_states_gt"].astype(np.int64)
+        T = forces.shape[0]
 
         # 本体感知: 任务相关
         if self.task == "stick_slip":
-            # pusher_x + state 作为 proprio
-            proprio = np.stack([
-                d["pusher_x"].astype(np.float32),
-            ], axis=-1)  # (T, 1)
+            proprio = np.stack([d["pusher_x"].astype(np.float32)], axis=-1)
         elif self.task == "peg_in_hole":
-            proprio = np.stack([
-                d["peg_z"].astype(np.float32),
-            ], axis=-1)  # (T, 1)
+            proprio = np.stack([d["peg_z"].astype(np.float32)], axis=-1)
         elif self.task == "stack_block":
-            gripper_x = d.get("gripper_x", np.zeros(len(states), dtype=np.float32))
-            gripper_z = d.get("gripper_z", np.zeros(len(states), dtype=np.float32))
-            proprio = np.stack([gripper_x, gripper_z], axis=-1)  # (T, 2)
+            proprio = np.stack([d["gripper_x"].astype(np.float32),
+                                d["gripper_z"].astype(np.float32)], axis=-1)
         else:
-            proprio = np.zeros((len(states), 1), dtype=np.float32)
+            proprio = np.zeros((T, 1), dtype=np.float32)
 
-        # 统一序列长度 (截断或填充)
-        if self.seq_len is not None:
-            T = frames.shape[0]
-            if T >= self.seq_len:
-                start = np.random.randint(0, T - self.seq_len + 1)
-                frames = frames[start : start + self.seq_len]
-                forces = forces[start : start + self.seq_len]
-                velocities = velocities[start : start + self.seq_len]
-                states = states[start : start + self.seq_len]
-                proprio = proprio[start : start + self.seq_len]
-            else:
-                # 填充
-                pad = self.seq_len - T
-                frames = np.pad(frames, ((0, pad), (0, 0), (0, 0), (0, 0)), mode="edge")
-                forces = np.pad(forces, ((0, pad), (0, 0)), mode="edge")
-                velocities = np.pad(velocities, ((0, pad), (0, 0)), mode="edge")
-                # 修复(缺陷7): 标签必须用 constant 填充 -100 (与 ignore_index 对齐),
-                # 原 mode="edge" 会复制末帧标签导致填充帧被错误训练
-                states = np.pad(states, (0, pad), mode="constant", constant_values=-100)
-                proprio = np.pad(proprio, ((0, pad), (0, 0)), mode="edge")
+        # --- 统一窗口 (先切片后展开, 避免展开全序列的中间开销) ---
+        if self.seq_len is not None and T >= self.seq_len:
+            start = np.random.randint(0, T - self.seq_len + 1)
+            L = self.seq_len
+        else:
+            start = 0
+            L = T
+
+        forces = forces[start:start + L]
+        velocities = velocities[start:start + L]
+        states = states[start:start + L]
+        proprio = proprio[start:start + L]
+
+        # 视觉帧窗口 (原始渲染帧空间对齐)
+        if frames_raw.shape[0] < T and ri > 1:
+            # 原始渲染帧: 窗口映射到 raw 索引再展开
+            raw_start = start // ri
+            raw_end = (start + L - 1) // ri + 1
+            fr = np.repeat(frames_raw[raw_start:raw_end], ri, axis=0)
+            fr = fr[start % ri : start % ri + L]
+        else:
+            # 已展开格式 (ri=1 或旧数据)
+            fr = frames_raw[start:start + L]
+
+        # --- 统一填充到 seq_len ---
+        if self.seq_len is not None and L < self.seq_len:
+            pad = self.seq_len - L
+            fr = np.pad(fr, ((0, pad), (0, 0), (0, 0), (0, 0)), mode="edge")
+            forces = np.pad(forces, ((0, pad), (0, 0)), mode="edge")
+            velocities = np.pad(velocities, ((0, pad), (0, 0)), mode="edge")
+            # 修复(缺陷7): 标签必须用 constant 填充 -100 (与 ignore_index 对齐)
+            states = np.pad(states, (0, pad), mode="constant", constant_values=-100)
+            proprio = np.pad(proprio, ((0, pad), (0, 0)), mode="edge")
+
+        # 视觉: uint8 → (T, 3, H, W) float32 [0,1]
+        frames = np.transpose(fr, (0, 3, 1, 2)).astype(np.float32) / 255.0
 
         # 修复(缺陷5): 模型输入去除速度通道 —— 标签(GT)由速度阈值定义,
         # 若速度拼入输入则"标签≈输入的确定性函数", 数据效率实验无区分度。
-        # force_input 仅为力 (3维)。速度仍保留在 npz 中用于标注/分析/可视化。
+        # force_input 仅为力 (3维)。速度仍保留用于标注/分析/可视化。
         force_input = forces
 
         sample = {

@@ -474,11 +474,11 @@ def main():
     test_set = torch.utils.data.Subset(dataset, test_idx)
 
     train_loader = DataLoader(train_set, batch_size=args.batch_size,
-                              shuffle=True, num_workers=2)
+                              shuffle=True, num_workers=0)
     val_loader = DataLoader(val_set, batch_size=args.batch_size,
-                            shuffle=False, num_workers=2)
+                            shuffle=False, num_workers=0)
     test_loader = DataLoader(test_set, batch_size=args.batch_size,
-                             shuffle=False, num_workers=2)
+                             shuffle=False, num_workers=0)
 
     # 模型
     model = ModelWrapper(args.model, args.task).to(device)
