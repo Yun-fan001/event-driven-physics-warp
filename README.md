@@ -52,6 +52,7 @@ Set-Location D:\projects\event-driven-physics-warp
 
 ## 实验结果 (stick_slip, 200 条轨迹, 30 epochs, seed 42)
 
+### 主线对比 (F1)
 | 模型 | F1 | Precision | Recall |
 |---|---|---|---|
 | Force-MLP @100% (连续力回归基线) | 0.404 | 0.363 | 0.546 |
@@ -64,18 +65,28 @@ Set-Location D:\projects\event-driven-physics-warp
 
 **主线验收标准: Event-TCN@50% (0.941) ≥ Force-MLP@100% (0.404) ✓ (2.3× 余量)**
 
+### 噪声鲁棒性 (力觉高斯噪声, F1) — H2 支持
+| σ (N) | Event-TCN | Force-MLP | RuleDetector |
+|---|---|---|---|
+| 0 (干净) | 0.929 | 0.404 | 0.874 |
+| 0.1 | 0.935 | 0.404 | 0.874 |
+| 0.3 | 0.907 | 0.404 | 0.702 |
+| 0.5 | 0.914 | 0.404 | **0.534** |
+
+Event-TCN σ=0.5 仅退化 1.6%, RuleDetector 手调阈值崩至 0.534 (-39%) —
+学习式事件检测对传感器噪声天然鲁棒, 验证假设 H2。
+(Force-MLP 地板效应: 纯力规则在干净数据下已无法区分 Stick/Slip)
+
+### 时间偏移 / Task2-3 矩阵 / 种子43-44
+后台链 `run_exp_phase2.ps1` 运行中 (完成标记: done_marker.txt = PHASE2_DONE),
+完成后: `python run_experiments_step3.py --exp collect` → `plot_results_step3.py`
+
 核心发现 (H1 支持):
 - 事件分类学习远超连续力回归 (0.93+ vs 0.40)
 - 数据效率: Event-TCN@50% ≈ @100%, 均超 RuleDetector
 - 力觉是主导模态 (Force-TCN 0.963 ≈ Event-TCN 0.929);
   128×128 侧视图+帧保持下视觉未增益 (论文消融讨论点)
 - 图表: `figures/data_efficiency.png`, `figures/ablation.png`; LaTeX 表见 plot 输出
-
-后续 (按规划):
-1. 噪声鲁棒性 + 时间偏移实验 (train_step2.py --force-noise-std / --time-shift-ms)
-2. peg_in_hole / stack_block 全模型矩阵
-3. 3 随机种子
-4. Isaac Lab 跨引擎 (12 月) → 实机 (寒假)
 
 ## 2026-11 修复摘要 (7 项缺陷)
 
