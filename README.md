@@ -50,43 +50,60 @@ Set-Location D:\projects\event-driven-physics-warp
   - peg_in_hole: 帧准确率 0.991, 事件 F1=1.000, 时间误差中位数 3 帧
   - stack_block: 帧准确率 0.983, 事件 F1=0.516 (R=1.000), 时间误差中位数 1 帧
 
-## 实验结果 (stick_slip, 200 条轨迹, 30 epochs, seed 42)
+## 实验结果汇总 (200 轨迹/任务, 30 epochs)
 
-### 主线对比 (F1)
-| 模型 | F1 | Precision | Recall |
+### 三任务全模型对比 (F1, seed 42)
+| 模型 | stick_slip | peg_in_hole | stack_block |
 |---|---|---|---|
-| Force-MLP @100% (连续力回归基线) | 0.404 | 0.363 | 0.546 |
-| Vision-Only @100% | 0.237 | 0.184 | 0.333 |
-| Force-TCN @100% (力觉-only 消融) | **0.963** | 0.978 | 0.949 |
-| Event-TCN @100% (多模态主模型) | 0.929 | 0.979 | 0.897 |
-| Event-TCN @50% | 0.941 | 0.943 | 0.939 |
-| Event-TCN @10% | 0.636 | 0.680 | 0.619 |
-| RuleDetector (零训练手调阈值) | 0.874 | 0.948 | 0.835 |
+| Force-MLP @100% | 0.404 | 0.980 | 0.459 |
+| Vision-Only @100% | 0.237 | 0.995 | 0.965 |
+| Force-TCN @100% | **0.963** | 0.980 | 0.963 |
+| Event-TCN @100% | 0.929 | **0.996** | **0.986** |
+| RuleDetector (零训练) | 0.874 | 0.985 | 0.433 |
 
-**主线验收标准: Event-TCN@50% (0.941) ≥ Force-MLP@100% (0.404) ✓ (2.3× 余量)**
+### 主线验收 (Event-TCN@50% ≥ Force-MLP@100%) — 3 种子复现 ✓
+| seed | Event-TCN@50% | Force-MLP@100% | 达标 |
+|---|---|---|---|
+| 42 | 0.941 | 0.404 | ✓ |
+| 43 | 0.957 | 0.433 | ✓ |
+| 44 | 0.921 | 0.410 | ✓ |
+| 均值±std | 0.940±0.018 | 0.416±0.015 | ✓ 2.3× |
 
-### 噪声鲁棒性 (力觉高斯噪声, F1) — H2 支持
+### 数据效率 (Event-TCN F1)
+| 数据量 | stick_slip | peg_in_hole | stack_block |
+|---|---|---|---|
+| 10% | 0.636 | 0.986 | 0.513 |
+| 50% | 0.941 | 0.984 | 0.969 |
+| 100% | 0.929 | 0.996 | 0.986 |
+
+### 噪声鲁棒性 (力觉高斯噪声, F1) — H2 ✓
 | σ (N) | Event-TCN | Force-MLP | RuleDetector |
 |---|---|---|---|
-| 0 (干净) | 0.929 | 0.404 | 0.874 |
+| 0 | 0.929 | 0.404 | 0.874 |
 | 0.1 | 0.935 | 0.404 | 0.874 |
 | 0.3 | 0.907 | 0.404 | 0.702 |
 | 0.5 | 0.914 | 0.404 | **0.534** |
 
-Event-TCN σ=0.5 仅退化 1.6%, RuleDetector 手调阈值崩至 0.534 (-39%) —
-学习式事件检测对传感器噪声天然鲁棒, 验证假设 H2。
-(Force-MLP 地板效应: 纯力规则在干净数据下已无法区分 Stick/Slip)
+### 时间偏移 (Event-TCN F1)
+| shift | stick_slip | stack_block (H3, 运行中) |
+|---|---|---|
+| 0 | 0.929 | 0.986 |
+| ±50 | 0.934 / 0.930 | ... |
+| ±100 | 0.960 / 0.909 | ... |
+| ±200 | 0.953 / 0.951 | ... |
 
-### 时间偏移 / Task2-3 矩阵 / 种子43-44
-后台链 `run_exp_phase2.ps1` 运行中 (完成标记: done_marker.txt = PHASE2_DONE),
-完成后: `python run_experiments_step3.py --exp collect` → `plot_results_step3.py`
+stick_slip 上视觉-力觉偏移 ±200ms 无显著退化 — 结构性零结果
+(该任务视觉分支贡献小, 力觉主导); H3 严格检验在视觉主导的
+stack_block 上进行 (`run_h3_stack_shift.ps1` 后台运行中)。
 
-核心发现 (H1 支持):
-- 事件分类学习远超连续力回归 (0.93+ vs 0.40)
-- 数据效率: Event-TCN@50% ≈ @100%, 均超 RuleDetector
-- 力觉是主导模态 (Force-TCN 0.963 ≈ Event-TCN 0.929);
-  128×128 侧视图+帧保持下视觉未增益 (论文消融讨论点)
-- 图表: `figures/data_efficiency.png`, `figures/ablation.png`; LaTeX 表见 plot 输出
+## 核心结论 (论文要点)
+1. **H1 (表示假设) ✓**: 事件分类学习 (0.93+) 远超连续力回归 (0.40), 3 种子复现;
+   stack_block 上 Event-TCN (0.986) > 力觉-only (0.963) ≈ 视觉-only (0.965)
+2. **数据效率 ✓**: 50% 数据即可达标, stick/stack 均有清晰曲线
+3. **H2 (噪声鲁棒) ✓**: Event-TCN σ=0.5N 仅退化 1.6%, 手调阈值基线崩至 0.534 (-39%)
+4. **模态消融**: stick_slip 力觉主导; stack_block 视觉贡献大 (Grip/Release 运动可见)
+5. **任务难度梯度**: peg (饱和) < stack < stick_slip (最难的滑移起始检测)
+6. 图表: `figures/data_efficiency.png` / `noise_robustness.png` / `ablation.png`
 
 ## 2026-11 修复摘要 (7 项缺陷)
 
