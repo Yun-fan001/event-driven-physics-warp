@@ -13,3 +13,7 @@ results_step3.json
 *.log
 done_marker.txt
 cuda_check.txt
+
+# Scratch (debug/diagnostic one-offs, not part of the project)
+scratch/
+
