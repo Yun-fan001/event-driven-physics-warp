@@ -357,19 +357,27 @@ def evaluate(model, xs, y_modes, y_forces, friction=None, batch=64):
 
 
 def intervention(model, xs, y_modes, y_forces, f_true, f_counter, batch=64):
-    """摩擦 +50% 干预: 滑移起始是否单调后移 (正确物理方向, 仅限 GT 含转移窗口)"""
+    """摩擦 +50% 干预: 滑移起始是否单调后移 (正确物理方向, 仅限 GT 含转移窗口)
+
+    严谨口径: a==b (无位移) 计 neutral, 不算 correct; 并报告平均位移与方向分布。
+    """
     _, o1, g1 = evaluate(model, xs, y_modes, y_forces, friction=f_true, batch=batch)
     _, o2, g2 = evaluate(model, xs, y_modes, y_forces, friction=f_counter, batch=batch)
     correct = wrong = neutral = 0
+    shifts = []
     for a, b, g in zip(o1, o2, g1):
         if not g:                          # GT 本窗口无滑移转移: 不计
             continue
         if a >= len(y_modes[0]) and b >= len(y_modes[0]):
             neutral += 1
-        elif b >= a:
+            continue
+        shifts.append(b - a)
+        if b > a:
             correct += 1
-        else:
+        elif b < a:
             wrong += 1
+        else:
+            neutral += 1                   # 无位移 = 摩擦未被使用, 不算正确
     total = correct + wrong
     return {
         "n_gt_slip_windows": correct + wrong + neutral,
@@ -377,6 +385,10 @@ def intervention(model, xs, y_modes, y_forces, f_true, f_counter, batch=64):
         "direction_wrong": wrong,
         "direction_neutral": neutral,
         "direction_rate": float(correct / total) if total else None,
+        "mean_shift_frames": float(np.mean(shifts)) if shifts else None,
+        "n_positive_shift": int(sum(1 for s in shifts if s > 0)),
+        "n_negative_shift": int(sum(1 for s in shifts if s < 0)),
+        "n_zero_shift": int(sum(1 for s in shifts if s == 0)),
     }
 # ============================================================
 # 主流程
@@ -453,7 +465,7 @@ def main():
     }
     print(f"  [intervention] {res['intervention']}")
 
-    suffix = "_anchored" if args.anchored_train else ""
+    suffix = ("_anchored" if args.anchored_train else "") + f"_s{args.seed}"
     result_path = out_dir / f"{args.model}{suffix}_results.json"
     result_path.write_text(json.dumps(res, indent=2, ensure_ascii=False),
                            encoding="utf-8")

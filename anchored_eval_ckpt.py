@@ -3,12 +3,13 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 from pathlib import Path
 
 import numpy as np
 import torch
 
-from event_wm import (build_model, evaluate, intervention,
+from event_wm import (H, build_model, evaluate, intervention,
                       load_trajectories, split_by_friction)
 from anchored_eval import make_anchored_windows
 
@@ -22,11 +23,13 @@ def main():
     ap.add_argument("--out-dir", default="checkpoints_wm")
     args = ap.parse_args()
     horizons = [int(h) for h in args.horizons.split(",")]
+    horizons = [h for h in horizons if h < H]   # 剔除退化视界
 
     ckpt = Path(args.ckpt)
     if not ckpt.exists():
         raise SystemExit(f"ckpt 不存在: {ckpt}")
     model_name = args.name.replace("_anchored", "")
+    model_name = re.sub(r"_s\d+$", "", model_name)
     model = build_model(model_name)
     model.load_state_dict(torch.load(ckpt, map_location="cpu"))
     model.eval()

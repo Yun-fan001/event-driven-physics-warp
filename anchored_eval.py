@@ -9,7 +9,7 @@ from pathlib import Path
 import numpy as np
 import torch
 
-from event_wm import (K, H, build_model, evaluate, intervention,
+from event_wm import (H, K, build_model, evaluate, intervention,
                       load_trajectories, split_by_friction, threshold_events,
                       ForceWM, ImplicitWM, EventWM)
 
@@ -61,6 +61,8 @@ def main():
     args = ap.parse_args()
     models = args.models.split(",")
     horizons = [int(h) for h in args.horizons.split(",")]
+    # h>=H-1 为退化视界 (GT 转移在 roll-out 窗口外), 自动剔除
+    horizons = [h for h in horizons if h < H]
 
     trajs = load_trajectories(args.data_dir)
     _, test_id, test_ood = split_by_friction(trajs)
