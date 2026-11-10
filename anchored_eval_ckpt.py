@@ -28,7 +28,7 @@ def main():
     ckpt = Path(args.ckpt)
     if not ckpt.exists():
         raise SystemExit(f"ckpt 不存在: {ckpt}")
-    model_name = args.name.replace("_anchored", "")
+    model_name = args.name.replace("_anchored", "").replace("_inv", "")
     model_name = re.sub(r"_s\d+$", "", model_name)
     model = build_model(model_name)
     model.load_state_dict(torch.load(ckpt, map_location="cpu"))

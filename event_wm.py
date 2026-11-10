@@ -219,7 +219,10 @@ def make_anchored_train(trajs, rng, n_per_traj=6):
 
 
 def train_model(model, xs, y_modes, y_forces, epochs=40, lr=1e-3, batch=64,
-                seed=0, class_weights=None):
+                seed=0, class_weights=None, inv_reg=False, inv_strength=1.0):
+    """训练; inv_reg=True 时给 EventWM 加训练中干预正则:
+    高摩擦输入下 'k 帧内已滑移' 累积概率不得高于真实摩擦输入 (随机占优 hinge),
+    在训练期就把 guard 条件的因果方向刻进编码器。"""
     torch.manual_seed(seed)
     opt = torch.optim.Adam(model.parameters(), lr=lr)
     ds = torch.utils.data.TensorDataset(
@@ -243,6 +246,17 @@ def train_model(model, xs, y_modes, y_forces, epochs=40, lr=1e-3, batch=64,
                 else:
                     loss = F.cross_entropy(out.reshape(-1, 3), mb.reshape(-1),
                                            label_smoothing=0.05)
+                if inv_reg:
+                    # 干预正则: do(摩擦×1.5) → 滑移不得更早
+                    xb_cf = xb.clone()
+                    xb_cf[:, :, 4] = xb_cf[:, :, 4] * 1.5
+                    out_cf = model(xb_cf, gt_modes=mb)
+                    p = F.softmax(out, -1)[:, :, 2]        # P(mode=SLIP)
+                    p_cf = F.softmax(out_cf, -1)[:, :, 2]
+                    cdf = 1.0 - torch.cumprod(1.0 - p, dim=1)
+                    cdf_cf = 1.0 - torch.cumprod(1.0 - p_cf, dim=1)
+                    reg = F.relu(cdf_cf - cdf).mean()      # 随机占优违反量
+                    loss = loss + inv_strength * reg
             else:
                 out = model(xb, gt_forces=fb)
                 loss = F.mse_loss(out, fb)
@@ -403,6 +417,9 @@ def main():
     ap.add_argument("--out-dir", default="checkpoints_wm")
     ap.add_argument("--anchored-train", action="store_true",
                     help="训练窗口混合转移锚定窗口 + SLIP 类加权")
+    ap.add_argument("--inv-reg", action="store_true",
+                    help="训练中干预正则 (do(摩擦×1.5) 随机占优 hinge)")
+    ap.add_argument("--inv-strength", type=float, default=1.0)
     args = ap.parse_args()
 
     out_dir = Path(args.out_dir)
@@ -438,7 +455,8 @@ def main():
     n_param = sum(p.numel() for p in model.parameters())
     print(f"  params: {n_param}")
     train_model(model, xs, ym, yf, epochs=args.epochs, seed=args.seed,
-                class_weights=class_weights)
+                class_weights=class_weights, inv_reg=args.inv_reg,
+                inv_strength=args.inv_strength)
 
     def friction_of(traj_list, n):
         vals = []
@@ -465,7 +483,10 @@ def main():
     }
     print(f"  [intervention] {res['intervention']}")
 
-    suffix = ("_anchored" if args.anchored_train else "") + f"_s{args.seed}"
+    suffix = ("_anchored" if args.anchored_train else "")
+    if args.inv_reg:
+        suffix += "_inv"
+    suffix += f"_s{args.seed}"
     result_path = out_dir / f"{args.model}{suffix}_results.json"
     result_path.write_text(json.dumps(res, indent=2, ensure_ascii=False),
                            encoding="utf-8")
