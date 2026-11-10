@@ -22,7 +22,7 @@ from event_wm import (Encoder, EventWM, evaluate, intervention, K, H,
 from anchored_eval import make_anchored_windows
 
 
-def load_detector(ckpt_path):
+def load_detector(ckpt_path, freeze=True):
     ckpt = torch.load(ckpt_path, map_location="cpu")
     args = ckpt.get("args", {})
     det = EventTCN(
@@ -36,9 +36,10 @@ def load_detector(ckpt_path):
     det.load_state_dict(
         {k.replace("model.", ""): v
          for k, v in ckpt["model_state_dict"].items()})
-    det.eval()
-    for p in det.parameters():
-        p.requires_grad_(False)
+    if freeze:
+        det.eval()
+        for p in det.parameters():
+            p.requires_grad_(False)
     return det
 
 
@@ -55,21 +56,38 @@ def augment(xs, det, batch=64):
     return torch.cat(out, 0).numpy()
 
 
+def det_logits(det, xb):
+    """可微版: 检测器 logits (联合训练用), xb (B,K,5) → (B,K,3)"""
+    return det(None, xb[:, :, :3], xb[:, :, 3:4])
+
+
 class DetEventWM(EventWM):
     def __init__(self, num_modes=3, hdim=128):
         super().__init__(num_modes, hdim)
         self.enc = Encoder(8)                    # 5 原始特征 + 3 检测 logits
+class JointDetEventWM(EventWM):
+    """联合优化版: 检测器可训练, 与 WM 一起由生成损失端到端优化"""
+    def __init__(self, det, num_modes=3, hdim=128):
+        super().__init__(num_modes, hdim)
+        self.enc = Encoder(8)
+        self.det = det                       # trainable
+
+    def forward(self, x, gt_modes=None):
+        x8 = torch.cat([x, det_logits(self.det, x)], dim=-1)
+        return super().forward(x8, gt_modes)
 
 
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--detector-ckpt",
-                    default="checkpoints/stick_slip/force_tcn/best.pt")
+                    default="checkpoints_wm_det/stick_slip/force_tcn/best.pt")
+    ap.add_argument("--joint", action="store_true",
+                    help="联合训练: 检测器与 WM 端到端 (否则冻结前端)")
     ap.add_argument("--epochs", type=int, default=60)
     ap.add_argument("--seed", type=int, default=0)
     args = ap.parse_args()
 
-    det = load_detector(args.detector_ckpt)
+    det = load_detector(args.detector_ckpt, freeze=not args.joint)
     trajs = load_trajectories("data/stick_slip")
     train_t, test_id, test_ood = split_by_friction(trajs)
 
@@ -85,20 +103,25 @@ def main():
     class_weights = torch.from_numpy(w.astype(np.float32))
     print(f"windows: {len(xs)}, class weights: {w}")
 
-    xs8 = augment(xs, det)
-    model = DetEventWM()
-    train_model(model, xs8, ym, yf, epochs=args.epochs, seed=args.seed,
+    name = "det_joint" if args.joint else "det_event_wm"
+    if args.joint:
+        model = JointDetEventWM(det)
+        xs_in = xs
+    else:
+        model = DetEventWM()
+        xs_in = augment(xs, det)
+    train_model(model, xs_in, ym, yf, epochs=args.epochs, seed=args.seed,
                 class_weights=class_weights)
 
-    res = {"model": "det_event_wm", "seed": args.seed,
+    res = {"model": name, "seed": args.seed,
            "detector": args.detector_ckpt}
     for hz in [16, 32, 64, 96]:
         xw, yw, yfw, fr = make_anchored_windows(test_ood, hz)
         if len(xw) == 0:
             continue
-        xw8 = augment(xw, det)
-        r, _, _ = evaluate(model, xw8, yw, yfw, friction=None)
-        iv = intervention(model, xw8, yw, yfw, fr, fr * 1.5)
+        xw_in = xw if args.joint else augment(xw, det)
+        r, _, _ = evaluate(model, xw_in, yw, yfw, friction=None)
+        iv = intervention(model, xw_in, yw, yfw, fr, fr * 1.5)
         r["intervention"] = iv
         r["n"] = len(xw)
         res[f"ood_h{hz}"] = r
@@ -106,11 +129,11 @@ def main():
               f"evF1={r['event_f1']:.3f} iv_rate={iv.get('direction_rate')} "
               f"shift={iv.get('mean_shift_frames')}")
 
-    out = Path("checkpoints_wm") / f"det_event_wm_s{args.seed}_anchored.json"
+    out = Path("checkpoints_wm") / f"{name}_s{args.seed}_anchored.json"
     out.write_text(json.dumps(res, indent=2, ensure_ascii=False),
                    encoding="utf-8")
     torch.save(model.state_dict(),
-               Path("checkpoints_wm") / f"det_event_wm_s{args.seed}.pt")
+               Path("checkpoints_wm") / f"{name}_s{args.seed}.pt")
     print(f"saved -> {out}")
 
 

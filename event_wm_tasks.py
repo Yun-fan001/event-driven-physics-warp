@@ -41,10 +41,12 @@ TASK_SPEC = {
     },
     "stack_block": {
         "num_modes": 3, "proprio_keys": ["gripper_x", "gripper_z"],
-        "transitions": [(0, 1)], "to_mode": 1,
+        "extra_keys": [("block_pos", 2)],          # 物块高度 block_z (⑤: 补物块位姿)
+        "transitions": [(0, 1), (1, 2)], "to_mode": 1,
         "intervene": {"channel": 4, "kind": "shift", "value": 0.002},
         "friction_split": False,
-        "gt_name": "grip", "cond_shift_note": "do(gripper_z +2mm)",
+        "gt_name": "grip/release", "cond_shift_note": "do(gripper_z +2mm)",
+        "event_names": ["grip", "release"],
     },
 }
 
@@ -63,6 +65,8 @@ def load_trajectories(data_dir, task):
             "friction": float(d["friction_scale"]),
             "file": f.name,
             **{k: d[k].astype(np.float32) for k in spec["proprio_keys"]},
+            **{f"extra_{i}": d[ek][:, ei].astype(np.float32)
+               for i, (ek, ei) in enumerate(spec.get("extra_keys", []))},
         })
     return trajs
 
@@ -73,8 +77,10 @@ def make_feat(t, task):
     parts = [t["force"]]
     for k in spec["proprio_keys"]:
         parts.append(t[k][:, None])
+    for i in range(len(spec.get("extra_keys", []))):
+        parts.append(t[f"extra_{i}"][:, None])
     parts.append(np.full((T, 1), t["friction"], dtype=np.float32))
-    return np.concatenate(parts, axis=1)          # (T, 3+len(proprio)+1)
+    return np.concatenate(parts, axis=1)          # (T, 3+P+E+1)
 
 
 def find_transitions(mode, fm, tm):
@@ -152,14 +158,16 @@ def split_trajectories(trajs, task, seed=42):
     return trajs[:n_train], trajs[n_train:], []
 
 
-def make_anchored_eval(trajs, task, horizon, max_per_traj=4):
+def make_anchored_eval(trajs, task, horizon, fm=None, tm=None, max_per_traj=4):
     spec = TASK_SPEC[task]
+    if fm is None:
+        fm, tm = spec["transitions"][0]
     xs, ym, yf, fric = [], [], [], []
     for t in trajs:
         T = len(t["mode"])
         feat = make_feat(t, task)
         n_traj = 0
-        for t_star in find_transitions(t["mode"], *spec["transitions"][0]):
+        for t_star in find_transitions(t["mode"], fm, tm):
             s = t_star - horizon - K
             if s < 0 or s + K + H > T:
                 continue
@@ -343,9 +351,11 @@ def match_events(pred_t, gt_t, fm, tm, tol=5):
     return f1, prec, rec
 
 
-def evaluate(model, xs, y_modes, y_forces, task, override=None, batch=64):
+def evaluate(model, xs, y_modes, y_forces, task, override=None, batch=64,
+             fm=None, tm=None):
     spec = TASK_SPEC[task]
-    fm, tm = spec["transitions"][0]
+    if fm is None:
+        fm, tm = spec["transitions"][0]
     model.eval()
     failures, f1s, mses = [], [], []
     pred_onsets, gt_trans = [], []
@@ -399,12 +409,16 @@ def evaluate(model, xs, y_modes, y_forces, task, override=None, batch=64):
     return out, pred_onsets, gt_trans
 
 
-def intervention(model, xs, y_modes, y_forces, task, ov_true, ov_cf, batch=64):
+def intervention(model, xs, y_modes, y_forces, task, ov_true, ov_cf, batch=64,
+                 fm=None, tm=None):
     """干预 (严格口径): a==b 计 neutral; 报告 mean_shift 与 +/−/0 分布"""
     spec = TASK_SPEC[task]
-    fm, tm = spec["transitions"][0]
-    _, o1, g1 = evaluate(model, xs, y_modes, y_forces, task, override=ov_true, batch=batch)
-    _, o2, g2 = evaluate(model, xs, y_modes, y_forces, task, override=ov_cf, batch=batch)
+    if fm is None:
+        fm, tm = spec["transitions"][0]
+    _, o1, g1 = evaluate(model, xs, y_modes, y_forces, task, override=ov_true,
+                         batch=batch, fm=fm, tm=tm)
+    _, o2, g2 = evaluate(model, xs, y_modes, y_forces, task, override=ov_cf,
+                         batch=batch, fm=fm, tm=tm)
     correct = wrong = neutral = 0
     shifts = []
     for a, b, g in zip(o1, o2, g1):
@@ -481,7 +495,7 @@ def main():
             print(f"  class counts={counts} weights={w}")
     print(f"  windows: train={len(xs)}")
 
-    in_dim = 3 + len(spec["proprio_keys"]) + 1
+    in_dim = 3 + len(spec["proprio_keys"]) + len(spec.get("extra_keys", [])) + 1
     model = build_model(args.model, spec["num_modes"], in_dim=in_dim)
     print(f"  params: {sum(p.numel() for p in model.parameters())} "
           f"(in_dim={in_dim})")
@@ -507,31 +521,39 @@ def main():
         res["random_ood"] = r
         print(f"  [random_ood] {r}")
 
-    # 转移锚定评估 + 干预
+    # 转移锚定评估 + 干预 (stack: grip 与 release 两类事件)
+    event_specs = [(fm, tm, spec.get("event_names", [str(tm)])[i])
+                   for i, (fm, tm) in enumerate(spec["transitions"])]
     for hz in [16, 32, 64, 96]:
-        xa, ya, yfa, fr = make_anchored_eval(test_t, args.task, hz)
-        if len(xa) == 0:
-            res[f"id_h{hz}"] = {"n": 0}
-            continue
-        r, _, _ = evaluate(model, xa, ya, yfa, args.task)
-        iv_res = intervention(model, xa, ya, yfa, args.task, ov_true, ov_cf)
-        r["intervention"] = iv_res
-        r["n"] = len(xa)
-        res[f"id_h{hz}"] = r
-        print(f"  [id h{hz}] n={len(xa)} FF={r['first_failure_mean']:.1f} "
-              f"evF1={r['event_f1']:.3f} iv_rate={iv_res.get('direction_rate')}")
-        if len(test_ood):
-            xa_o, ya_o, yfa_o, fr_o = make_anchored_eval(test_ood, args.task, hz)
-            if len(xa_o):
-                r, _, _ = evaluate(model, xa_o, ya_o, yfa_o, args.task)
-                iv_res = intervention(model, xa_o, ya_o, yfa_o, args.task,
-                                      ov_true, ov_cf)
-                r["intervention"] = iv_res
-                r["n"] = len(xa_o)
-                res[f"ood_h{hz}"] = r
-                print(f"  [ood h{hz}] n={len(xa_o)} FF={r['first_failure_mean']:.1f} "
-                      f"evF1={r['event_f1']:.3f} "
-                      f"iv_rate={iv_res.get('direction_rate')}")
+        for (fm, tm, ev_name) in event_specs:
+            xa, ya, yfa, fr = make_anchored_eval(test_t, args.task, hz, fm, tm)
+            if len(xa) == 0:
+                res[f"id_h{hz}_{ev_name}"] = {"n": 0}
+                continue
+            r, _, _ = evaluate(model, xa, ya, yfa, args.task, fm=fm, tm=tm)
+            iv_res = intervention(model, xa, ya, yfa, args.task, ov_true, ov_cf,
+                                  fm=fm, tm=tm)
+            r["intervention"] = iv_res
+            r["n"] = len(xa)
+            res[f"id_h{hz}_{ev_name}"] = r
+            print(f"  [id h{hz} {ev_name}] n={len(xa)} "
+                  f"FF={r['first_failure_mean']:.1f} evF1={r['event_f1']:.3f} "
+                  f"iv_rate={iv_res.get('direction_rate')}")
+            if len(test_ood):
+                xa_o, ya_o, yfa_o, fr_o = make_anchored_eval(test_ood, args.task,
+                                                             hz, fm, tm)
+                if len(xa_o):
+                    r, _, _ = evaluate(model, xa_o, ya_o, yfa_o, args.task,
+                                       fm=fm, tm=tm)
+                    iv_res = intervention(model, xa_o, ya_o, yfa_o, args.task,
+                                          ov_true, ov_cf, fm=fm, tm=tm)
+                    r["intervention"] = iv_res
+                    r["n"] = len(xa_o)
+                    res[f"ood_h{hz}_{ev_name}"] = r
+                    print(f"  [ood h{hz} {ev_name}] n={len(xa_o)} "
+                          f"FF={r['first_failure_mean']:.1f} "
+                          f"evF1={r['event_f1']:.3f} "
+                          f"iv_rate={iv_res.get('direction_rate')}")
 
     out_path = out_dir / f"{tag}_results.json"
     out_path.write_text(json.dumps(res, indent=2, ensure_ascii=False),
