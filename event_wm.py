@@ -247,7 +247,10 @@ def train_model(model, xs, y_modes, y_forces, epochs=40, lr=1e-3, batch=64,
                     loss = F.cross_entropy(out.reshape(-1, 3), mb.reshape(-1),
                                            label_smoothing=0.05)
                 if inv_reg:
-                    # 干预正则: do(摩擦×1.5) → 滑移不得更早
+                    # 干预正则 v2: do(摩擦×1.5) → 滑移不得更早
+                    # v1 负结果: 非对称 hinge 使"永不预测滑移"成为捷径 (evF1 全 0)。
+                    # v2 修正: 仅在 GT 含转移的窗口施加 (CE 已强制这些窗口预测滑移,
+                    #   hinge 只塑造摩擦依赖性, 无零代价逃逸)。
                     xb_cf = xb.clone()
                     xb_cf[:, :, 4] = xb_cf[:, :, 4] * 1.5
                     out_cf = model(xb_cf, gt_modes=mb)
@@ -255,7 +258,16 @@ def train_model(model, xs, y_modes, y_forces, epochs=40, lr=1e-3, batch=64,
                     p_cf = F.softmax(out_cf, -1)[:, :, 2]
                     cdf = 1.0 - torch.cumprod(1.0 - p, dim=1)
                     cdf_cf = 1.0 - torch.cumprod(1.0 - p_cf, dim=1)
-                    reg = F.relu(cdf_cf - cdf).mean()      # 随机占优违反量
+                    viol = F.relu(cdf_cf - cdf)
+                    mask = torch.zeros(len(mb), dtype=torch.bool)
+                    for j in range(len(mb)):
+                        g = mb[j]
+                        mask[j] = any(g[k - 1] == 1 and g[k] == 2
+                                      for k in range(1, len(g)))
+                    if mask.any():
+                        reg = viol[mask].mean()
+                    else:
+                        reg = torch.zeros(())
                     loss = loss + inv_strength * reg
             else:
                 out = model(xb, gt_forces=fb)
@@ -485,7 +497,7 @@ def main():
 
     suffix = ("_anchored" if args.anchored_train else "")
     if args.inv_reg:
-        suffix += "_inv"
+        suffix += "_inv2"    # v2: GT转移窗口限定的支配正则 (v1 负结果见 git 历史)
     suffix += f"_s{args.seed}"
     result_path = out_dir / f"{args.model}{suffix}_results.json"
     result_path.write_text(json.dumps(res, indent=2, ensure_ascii=False),
