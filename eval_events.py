@@ -87,12 +87,15 @@ def main():
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--seq-len", type=int, default=128)
     p.add_argument("--tolerance", type=int, default=5)
+    p.add_argument("--hidden-dim", type=int, default=128)
+    p.add_argument("--tcn-layers", type=int, default=4)
     args = p.parse_args()
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model = ModelWrapper(args.model, args.task).to(device)
-    ckpt = torch.load(args.checkpoint, map_location=device)
+    model = ModelWrapper(args.model, args.task,
+                         hidden_dim=args.hidden_dim, tcn_layers=args.tcn_layers).to(device)
     if args.model != "rule_detector":
+        ckpt = torch.load(args.checkpoint, map_location=device)
         model.load_state_dict(ckpt["model_state_dict"])
     model.eval()
 

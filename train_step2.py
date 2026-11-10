@@ -202,7 +202,8 @@ class ModelWrapper(nn.Module):
     force_lstm:  力觉-only Bi-LSTM (TCN 不稳定时的降级消融)
     event_lstm:  多模态 Bi-LSTM (TCN 不稳定时的降级方案)
     """
-    def __init__(self, model_name: str, task: str):
+    def __init__(self, model_name: str, task: str,
+                 hidden_dim: int = 128, tcn_layers: int = 4):
         super().__init__()
         cfg = TASK_CONFIG[task]
         self.model_name = model_name
@@ -211,10 +212,10 @@ class ModelWrapper(nn.Module):
 
         if model_name == "force_mlp":
             # 纯力回归器: 只预测连续力，不学分类
-            self.model = ForceMLP(input_dim=cfg["force_dim"])
+            self.model = ForceMLP(input_dim=cfg["force_dim"], hidden_dim=hidden_dim)
             # 不添加 classifier —— eval 时用 force_to_events() 阈值判定
         elif model_name == "vision_only":
-            self.model = VisionOnly(num_classes=cfg["num_classes"])
+            self.model = VisionOnly(num_classes=cfg["num_classes"], hidden_dim=hidden_dim)
         elif model_name == "force_tcn":
             # 力觉-only TCN: EventTCN 去掉视觉编码器分支
             self.model = EventTCN(
@@ -222,12 +223,16 @@ class ModelWrapper(nn.Module):
                 vision_feat_dim=0,           # 0 → 跳过视觉编码
                 force_dim=cfg["force_dim"],
                 proprio_dim=cfg["proprio_dim"],
+                hidden_dim=hidden_dim,
+                tcn_layers=tcn_layers,
             )
         elif model_name == "event_tcn":
             self.model = EventTCN(
                 num_classes=cfg["num_classes"],
                 force_dim=cfg["force_dim"],
                 proprio_dim=cfg["proprio_dim"],
+                hidden_dim=hidden_dim,
+                tcn_layers=tcn_layers,
             )
         elif model_name == "force_lstm":
             # TCN 不稳定时的降级方案: 力觉-only Bi-LSTM
@@ -236,6 +241,7 @@ class ModelWrapper(nn.Module):
                 vision_feat_dim=0,           # 0 → 跳过视觉编码
                 force_dim=cfg["force_dim"],
                 proprio_dim=cfg["proprio_dim"],
+                hidden_dim=hidden_dim,
             )
         elif model_name == "event_lstm":
             # TCN 不稳定时的降级方案: 多模态 Bi-LSTM
@@ -243,6 +249,7 @@ class ModelWrapper(nn.Module):
                 num_classes=cfg["num_classes"],
                 force_dim=cfg["force_dim"],
                 proprio_dim=cfg["proprio_dim"],
+                hidden_dim=hidden_dim,
             )
         elif model_name == "rule_detector":
             # 基线C (新增): 零训练手调阈值规则 —— 代表"工程师手工方案"。
@@ -445,6 +452,8 @@ def main():
     parser.add_argument("--time-shift-ms", type=float, default=0.0,
                         help="视觉-力觉时间偏移 (ms, ±50/±100/±200)")
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--hidden-dim", type=int, default=128)
+    parser.add_argument("--tcn-layers", type=int, default=4)
     args = parser.parse_args()
 
     torch.manual_seed(args.seed)
@@ -488,7 +497,8 @@ def main():
                              shuffle=False, num_workers=0)
 
     # 模型
-    model = ModelWrapper(args.model, args.task).to(device)
+    model = ModelWrapper(args.model, args.task,
+                         hidden_dim=args.hidden_dim, tcn_layers=args.tcn_layers).to(device)
 
     output_dir = Path(args.output_dir) / args.task / args.model
     # 多种子实验: 非默认 seed 写入 seed_ 子目录 (避免覆盖)

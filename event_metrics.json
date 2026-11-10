@@ -1,0 +1,14 @@
+{
+  "task": "stick_slip",
+  "model": "rule_detector",
+  "seed": 42,
+  "num_test_trajectories": 30,
+  "frame_accuracy": 0.9637444444444444,
+  "event_f1": 0.23931623931623935,
+  "event_precision": 0.13725490196078433,
+  "event_recall": 0.9333333333333333,
+  "gt_events_total": 30,
+  "pred_events_total": 204,
+  "time_error_median_frames": 1.0,
+  "time_error_max_frames": 5.0
+}
