@@ -170,15 +170,14 @@ class PegInHoleEnv(gym.Env):
         return float(self.data.sensordata[self._touch_adr])
 
     # ============================================================
-    # GT 接触状态判定 —— 运动学真值 (缺陷4修复: GT 运动学化)
-    #   接触 = 几何间距判据 (peg_tip 与 socket 底面距离)
+    # GT 接触状态判定 —— 物理真值 (2026-11 清理: 去 peg_z 位置泄漏)
+    #   接触 = 真实接触力 > 0.5 N (mj_contactForce), 与 peg_z 位置完全解耦
+    #   (原几何判据 peg_z-0.05<=0.011 是 peg_z 的确定性函数, 而 peg_z 是模型
+    #    本体输入 → 标签泄漏, peg 0.996 虚高。改为物理接触力后, 模型必须
+    #    从力信号真正学到"接触"而非读位置。)
     # ============================================================
     def _is_in_contact(self) -> bool:
-        # peg_tip 世界 z = peg_z qpos - 0.05 (body 在原点, 几何半高 0.05)
-        tip_z = float(self.data.qpos[self._peg_z_qpos_adr]) - 0.05
-        # socket_bottom 顶面 z = 0.01 (box 中心 0.005 + 半高 0.005)
-        socket_top_z = 0.01
-        return tip_z <= socket_top_z + 0.001
+        return float(np.linalg.norm(self._get_contact_force())) > 0.5
 
     def _get_contact_state(self) -> ContactState:
         if self._is_in_contact():

@@ -226,29 +226,24 @@ class StackBlockEnv(gym.Env):
         return self.data.sensordata[self._block_pos_adr : self._block_pos_adr + 3].copy()
 
     # ============================================================
-    # 接触状态判定 —— 论文 Ground Truth (缺陷修复: 与控制器状态机完全解耦)
-    # 纯运动学真值 (带 10mm 死区防抖动):
-    #   GRIP    = gripper 尖端触及物块顶面 (gz < block_z + 0.035)
-    #   RELEASE = 物块在目标平台 (|x-0.15|<0.03 且 block_z<0.07) 且 gripper 已明显离开
-    #             (gz > block_z + 0.045, 尖端高于顶面 12mm)
-    #   NO_CONTACT = 其他 (含死区: 尖端在顶面上方 2mm~12mm 之间的过渡)
-    # 不再依赖 _phase / force / gripper_force 阈值
+    # 接触状态判定 —— 物理真值 (2026-11 清理: 去 gripper_z 位置泄漏)
+    #   GRIP    = 真实接触力 > 0.5 N (夹爪-物块接触, 吸力保持期约 0.7N)
+    #   RELEASE = 物块在目标平台 (block_pos 运动学, 不进模型输入) 且接触力 < 0.5 N
+    #   NO_CONTACT = 其他
+    # (原判据 gripper_z < block_z+0.035 用了 gripper_z, 而 gripper_z 是模型
+    #  本体输入 → 标签泄漏。改为接触力后与模型本体通道解耦。)
     # ============================================================
     def _get_contact_state(self) -> ContactState:
+        force_mag = float(np.linalg.norm(self._get_gripper_force()))
         block_pos = self._get_block_position()
         block_z = float(block_pos[2])
         block_x = float(block_pos[0])
-        gripper_z = float(self.data.qpos[self._gripper_z_qpos])
-
-        # gripper 尖端 z = gripper_z - 0.008; 物块顶面 z = block_z + 0.025
-        # 触及 = 尖端低于顶面+2mm → gripper_z < block_z + 0.035
-        is_gripped = gripper_z < block_z + 0.035
 
         on_target = (abs(block_x - 0.15) < 0.03) and (block_z < 0.07)
 
-        if on_target and (gripper_z > block_z + 0.045):
+        if on_target and force_mag < 0.5:
             return ContactState.CONTACT_RELEASE
-        if is_gripped:
+        if force_mag > 0.5:
             return ContactState.CONTACT_GRIP
         return ContactState.NO_CONTACT
 
