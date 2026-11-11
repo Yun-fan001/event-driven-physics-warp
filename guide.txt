@@ -1,220 +1,41 @@
+﻿---------------------------------------
+快速指南 (2026-11-11 更新版)
 ---------------------------------------
-快速指南 (2026-11 重规划修复版)
----------------------------------------
-环境: D:\projects\event-driven-physics-warp\.venv (uv, Python 3.12, MuJoCo 3.15)
+环境: D:\projects\event-driven-physics-warp\.venv (uv, Python 3.12, MuJoCo)
 所有命令在项目根目录 D:\projects\event-driven-physics-warp 下运行。
 
-# 0. 环境检查
+# 0. 环境与物理检查
 .venv\Scripts\python.exe check_env_v2.py
-.venv\Scripts\python.exe smoke_env.py   # 三任务物理冒烟测试
+.venv\Scripts\python.exe smoke_env.py
 
-# 1. 采集单条轨迹并可视化调参 (每任务各 1 条)
-.venv\Scripts\python.exe collect_data_step2.py --task stick_slip  --num-episodes 1 --output-dir data/test/stick_slip
-.venv\Scripts\python.exe collect_data_step2.py --task peg_in_hole --num-episodes 1 --output-dir data/test/peg_in_hole
-.venv\Scripts\python.exe collect_data_step2.py --task stack_block --num-episodes 1 --output-dir data/test/stack_block
-
-# 2. 可视化 (GT 黑线 vs Auto 红线 vs 事件竖线)
-.venv\Scripts\python.exe visualize_step2.py --task stick_slip  --traj data/test/stick_slip/traj_0000.npz
-.venv\Scripts\python.exe visualize_step2.py --task peg_in_hole --traj data/test/peg_in_hole/traj_0000.npz
-.venv\Scripts\python.exe visualize_step2.py --task stack_block --traj data/test/stack_block/traj_0000.npz
-
-# 3. 标注质量报告 (事件 F1/P/R ±5帧 + 时间误差分布, 中位数<=2帧)
-.venv\Scripts\python.exe annotation_report.py --task all --data-dir data/test
-
-# 4. 正式采集 (3 任务 x 200 条; 训练/测试按 seed 划分, 如 0-169 训练 + 170-199 测试)
+# 1. 采集 (输出目录可自定义; 大规模采集用 H100 目录的多进程版)
 .venv\Scripts\python.exe collect_data_step2.py --task stick_slip  --num-episodes 200 --output-dir data/stick_slip
 .venv\Scripts\python.exe collect_data_step2.py --task peg_in_hole --num-episodes 200 --output-dir data/peg_in_hole
 .venv\Scripts\python.exe collect_data_step2.py --task stack_block --num-episodes 200 --output-dir data/stack_block
 
-# 5. 训练 (主模型 Event-TCN)
-.venv\Scripts\python.exe train_step2.py --task stick_slip --model event_tcn --data-dir data/stick_slip --epochs 50
+# 2. 可视化单条轨迹 (GT 黑线 vs Auto 红线 vs 事件竖线)
+.venv\Scripts\python.exe visualize_step2.py --task stick_slip  --traj data/stick_slip/traj_0000.npz
+.venv\Scripts\python.exe visualize_step2.py --task peg_in_hole --traj data/peg_in_hole/traj_0000.npz
+.venv\Scripts\python.exe visualize_step2.py --task stack_block --traj data/stack_block/traj_0000.npz
 
-# 6. 全模型对比 (含 RuleDetector 零训练基线)
-.venv\Scripts\python.exe train_step2.py --task stick_slip --model rule_detector --data-dir data/stick_slip
-.venv\Scripts\python.exe train_step2.py --task stick_slip --model force_mlp    --data-dir data/stick_slip --epochs 50
-.venv\Scripts\python.exe train_step2.py --task stick_slip --model vision_only  --data-dir data/stick_slip --epochs 50
+# 3. 标注质量报告 (事件 F1/P/R ±5 帧 + 时间误差分布)
+.venv\Scripts\python.exe annotation_report.py --task all --data-dir data
 
-# 7. 批量实验矩阵 + 绘图
-.venv\Scripts\python.exe run_experiments_step3.py --exp data_efficiency --dry-run
-.venv\Scripts\python.exe run_experiments_step3.py --exp data_efficiency
-.venv\Scripts\python.exe run_experiments_step3.py --exp collect --output results_step3.json
-.venv\Scripts\python.exe plot_results_step3.py --results results_step3.json --output-dir figures/
+# 4. 判别式训练 (模型: event_tcn / force_tcn / force_mlp / vision_only / event_lstm / rule_detector)
+.venv\Scripts\python.exe train_step2.py --task stick_slip --model event_tcn --data-dir data/stick_slip --epochs 30
 
-# 修复后的验收标准 (《实验规划》重规划版):
-#   事件 macro-F1/P/R (±5帧容差) + 事件时刻误差中位数 <= 2 帧 + 3 随机种子
-#   主线: Event-TCN @ 50% 数据 F1 >= Force-MLP @ 100% 数据 F1
-#   基线: RuleDetector (零训练手调阈值) 必须被主模型明确超越
-#   诚实条款: 未达预期转原因分析写入 Limitation, 绝不改数据
+# 5. 实验矩阵 (数据效率/噪声/时间偏移)
+.venv\Scripts\python.exe run_experiments_step3.py
 
----------------------------------------
-Step 1 (旧版种子采集, 兼容保留)
----------------------------------------
-# 1. 安装依赖
-pip install -r requirements.txt
+# 6. 事件级评估 (±5 帧口径; 帧级 F1 只作参考)
+.venv\Scripts\python.exe eval_events.py --task stick_slip --model force_tcn
 
-# 2. 跑1条轨迹，可视化调参
-python collect_seed_data.py --num-episodes 1 --output-dir data/test
-python visualize_trajectory.py --traj data/test/traj_0000.npz
+# 7. 世界模型三路对照 (详见 results_wm.md: 设计/数据/结果/意义/复现命令)
+.venv\Scripts\python.exe event_wm.py --model event_wm --epochs 60 --anchored-train --seed 0
+.venv\Scripts\python.exe event_wm_tasks.py --task peg_in_hole --model event_wm --epochs 25 --anchored-train
+.venv\Scripts\python.exe event_wm_det.py --epochs 60 --joint
 
-# 3. 观察PNG图片：
-#    - 黑线(GT)和红线(Auto)是否重合？
-#    - 红色虚线(事件)是否卡在力骤降/速度突增的时刻？
-#    - 如不重合，修改 event_annotation.py 的 AnnotationConfig 阈值
+# 8. 审计 (训练前后)
+.venv\Scripts\python.exe scratch\audit_rigor.py
 
-# 4. 调参满意后，正式采集100条
-python collect_seed_data.py --num-episodes 100 --output-dir data/seed
-
-# 5. 验收
-python validate_step1.py --data-dir data/seed
-
-
-PyTorch 问题后续处理（Step 2 之前解决即可）
-| 方案        | 操作                                  | 难度          |
-| --------- | ----------------------------------- | ----------- |
-| **A（推荐）** | 用 Conda 装 PyTorch                   | 中（需装 Conda） |
-| **B**     | 卸载 pip 版，装 CPU 版 `torch==2.2.0+cpu` | 低           |
-仅针对Windows备选方案：
-| **C**     | 关闭 Windows Smart App Control        | 低（但降低安全性）   |
-
-
-批注文件清单
-| # | 文件名                              | 核心内容                | 关键批注点                                                                          
-| - | ----------------------------------- | ------------------ | ------------------------------------------------------------------------------ 
-| 1 | `env_stick_slip.py`       | MuJoCo环境 + Ground Truth生成 | `ContactState`枚举、`stick_vel_threshold`阈值、`renderer.close()` BUG修复、action单向逻辑说明 
-| 2 | `event_annotation.py`     | 自动标注算法                   | 两阶段标注逻辑、滞后带设计(`slip_vel_threshold` > `stick_vel_threshold`)、力跳变+速度跳变双重确认       
-| 3 | `collect_seed_data.py`    | 批量采集100条轨迹              | 摩擦随机化范围、数据格式说明、验收精度自动提示                                                        
-| 4 | `visualize_trajectory.py` | 力/速度/状态三图可视化         | 阈值参考线(橙色/红色虚线)、GT黑线 vs Auto红线对比、事件竖线标记                                         
-| 5 | `validate_step1.py`       | 批量精度验收（新标准）          | **核心：事件召回率≥99%**（允许±5帧误差）、帧级准确率仅作参考、问题轨迹定位 
-
-
-
-
-
-
----------------------------------------
-Step 2
---------------------------------------
-# 1. 采集数据 (每个任务 200 条)
-python collect_data_step2.py --task stick_slip   --num-episodes 200 --output-dir data/stick_slip
-python collect_data_step2.py --task peg_in_hole  --num-episodes 200 --output-dir data/peg_in_hole
-python collect_data_step2.py --task stack_block  --num-episodes 200 --output-dir data/stack_block
-
-# 2. 训练模型 (3 任务 × 6 模型 = 18 组实验)
-# 例: Task 1 + Event-TCN
-python train_step2.py --task stick_slip --model event_tcn --data-dir data/stick_slip --epochs 50
-
-# 3. 数据效率实验 (只用 10% / 50% 数据)
-python train_step2.py --task stick_slip --model event_tcn --data-dir data/stick_slip --data-fraction 0.1
-python train_step2.py --task stick_slip --model event_tcn --data-dir data/stick_slip --data-fraction 0.5
-
-# 4. TCN 训练不稳定时的降级方案
-python train_step2.py --task stick_slip --model event_lstm --data-dir data/stick_slip --epochs 50
-python train_step2.py --task stick_slip --model force_lstm --data-dir data/stick_slip --epochs 50
-
-先跑通 collect_data_step2.py --task peg_in_hole --num-episodes 10 验证场景物理稳定性
-如果 Task 3 方块滑落/吸不住，调大 stack_block.xml 中的 friction="1.5" 或 gripper_geom 质量
-训练时若显存不足，把 seq_len 从 128 降到 64，或减小 batch_size
-
-
-| 设计点                       | 说明                                                                         
-| ------------------------- | -------------------------------------------------------------------------- 
-| **Task 2 简化**             | Peg 直接用 slide joint 控制 z 方向，避免 freejoint 倾倒不稳定，核心验证 Contact/NoContact 检测即可 
-| **Task 3 吸盘设计**           | 用高摩擦圆柱代替复杂夹爪 finger，通过"压紧-提起"物理实现抓取，状态机自动执行序列                              |
-| **Force-MLP 基线**            | 纯力回归(MSE) + 固定阈值判定事件。严格模拟传统「先恢复物理量→再规则推理」路径 
-| **Vision-Only 用单向 LSTM** | 保证与 Event-TCN 一致的因果性（不窥探未来帧），公平对比多模态与单模态性能 
-| **Event-TCN 因果卷积**        | 确保实时性（t 时刻输出只依赖 ≤t 输入），适合机器人在线部署                                           
-| **Event-LSTM 降级方案**       | Bi-LSTM 替代因果卷积，TCN 训练不稳定时使用。注意: Bi-LSTM 双向引入未来帧，不保证因果性，论文需讨论       
-| **统一 Dataset 接口**         | `seq_len` 参数支持截断/填充，方便后续做不同长度实验                                            
-
-
-| #  | 文件名                      | 核心内容                                  | 关键批注点                                                                                                                                              
-| -- | ------------------------ | ------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------- 
-| 1  | `env_peg_in_hole.py`     | Task 2 MuJoCo 环境 + Ground Truth 生成    | `ContactState` 二分类(NO\_CONTACT/CONTACT)、圆柱垂直插入物理场景、位置伺服 `peg_pos` 驱动、力阈值判定接触                                                                       
-| 2  | `env_stack_block.py`     | Task 3 MuJoCo 环境 + 阶段状态机 Ground Truth | `ContactState` 三分类(NO\_CONTACT/GRIP/RELEASE)、内置 Phase 状态机(0~5)自动执行抓取-平移-放置序列、以阶段为主+物理量为辅的混合 GT 判定                                                  
-| 3  | `event_annotation_v2.py` | 三任务统一自动标注算法                        | 支持 Task 1/2/3 的分发函数(`annotate_stick_slip`/`annotate_peg_in_hole`/`annotate_stack_block`)、Task 2 检测 NoContact→Contact 跳变、Task 3 检测 Grip/Release 双事件 
-| 4  | `collect_data_step2.py`  | 三任务统一批量采集脚本                        | `TASK_MAP` 字典动态路由到对应环境和采集函数、各任务字段自适应保存(Stick-Slip 存 `pusher_x`，Peg 存 `peg_z`，Stack 存 `gripper_x/z` + `block_pos`)、保持 `.npz` 格式与 Step 1 兼容          
-| 5  | `dataset.py`             | PyTorch Dataset 统一数据加载器               | 三任务自动解析不同 proprio 维度(Stick: pusher\_x / Peg: peg\_z / Stack: gripper\_x+z)、`seq_len` 参数支持截断/填充、视觉帧 uint8→float32 \[0,1] 归一化 + 维度重排                 
-| 6  | `train_step2.py`         | 三任务 × 四模型 训练主脚本                    | `ModelWrapper` 统一接口(Force-MLP/Vision-Only/Force-TCN/Event-TCN)、Force-MLP **纯 MSE 力回归→阈值判定**(严格传统路径)、`data_fraction` 支持数据效率实验、`force_noise_std` + `time_shift_ms` 支持噪声注入、自动计算 F1/Precision/Recall          
-| 7  | `models/force_mlp.py`    | 基线 A: 连续力回归                            | 输入力觉序列(6维: 力+速度)、3层 MLP 编码 + 输出 3D 连续力预测、**不含分类头**(训练只用 MSE，eval 通过 force_to_events() 阈值规则判定事件)                                                                 
-| 8  | `models/vision_only.py`  | 基线 B: 纯视觉事件预测                        | 轻量 CNN(3层 Conv + AdaptiveAvgPool)编码单帧 → 单向 LSTM 时序聚合 → 分类头、证明力觉模态必要性                                                   
-| 9  | `models/event_tcn.py`    | 主模型: 多模态 Event-TCN + Force-TCN 消融   | 视觉 CNN 编码(可选跳过，`vision_feat_dim=0`→Force-TCN) + 模态拼接投影 + 4层空洞因果卷积(指数增长 dilation) + 残差连接、`CausalConv1d` 确保实时因果性、支持视觉+力觉+本体感知三模态融合                                        
-| 10 | `visualize_step2.py`     | Step 2 三任务统一可视化脚本                   | 支持 `--task stick_slip/peg_in_hole/stack_block`、各任务专属三子图(力/速度+位置/状态阶梯图)、事件竖线标记(Slip红色/Contact红色/Grip绿色+Release红色)                             
-| 11 | `peg_in_hole.xml`        | Task 2 物理场景定义                         | 方孔 Socket(底部+四壁) + 圆柱 Peg、z 轴 slide 关节限位 `0.02~0.2`、力传感器挂在 `peg_tip`、侧面相机 `side_cam`                                                               
-| 12 | `stack_block.xml`        | Task 3 物理场景定义                         | 目标平台 `platform` + 自由方块 `block` + 吸盘式 gripper(圆柱体)、x/z 双 slide 关节实现抓取-平移-放置、高摩擦系数 `1.5` 确保吸起成功率                                                     
-
-
-
-
----------------------------------------
-Step 3
----------------------------------------
-目标: 训练模型，产出第一条对比曲线，并实验噪声影响强度。
-
-验收标准: Event-TCN 在 50% 数据量下 F1-score > Force-MLP 在 100% 数据量下的表现。
-
-# --- 快速测试: 单任务单模型 (约 2-5 分钟) ---
-python train_step2.py --task stick_slip --model event_tcn --data-dir data/stick_slip --epochs 50
-
-# --- 数据效率实验: 手动逐组运行 ---
-# 以下每组实验对应论文 Fig. X: F1-score vs. 训练数据量
-python train_step2.py --task stick_slip --model event_tcn    --data-dir data/stick_slip --data-fraction 0.1
-python train_step2.py --task stick_slip --model event_tcn    --data-dir data/stick_slip --data-fraction 0.5
-python train_step2.py --task stick_slip --model force_mlp    --data-dir data/stick_slip --data-fraction 1.0
-# ... 自行扩展到 3 tasks × 4 models × 3 fractions
-
-# --- 噪声鲁棒性实验: 手动逐组运行 ---
-# 力觉通道加高斯噪声 (模拟传感器零漂)
-python train_step2.py --task stick_slip --model event_tcn --data-dir data/stick_slip --force-noise-std 0.1
-python train_step2.py --task stick_slip --model event_tcn --data-dir data/stick_slip --force-noise-std 0.3
-
-# 视觉与力觉时间偏移 (模拟异步采集)
-python train_step2.py --task stick_slip --model event_tcn --data-dir data/stick_slip --time-shift-ms 50
-python train_step2.py --task stick_slip --model event_tcn --data-dir data/stick_slip --time-shift-ms 100
-python train_step2.py --task stick_slip --model event_tcn --data-dir data/stick_slip --time-shift-ms 200
-
-# --- 批量实验: 自动化运行全部实验矩阵 ---
-# 预览 (不实际运行)
-python run_experiments_step3.py --exp all --dry-run
-
-# 运行全部 (数据效率 + 噪声鲁棒性)，耗时较长，建议分步运行
-python run_experiments_step3.py --exp data_efficiency
-python run_experiments_step3.py --exp noise_robustness
-
-# 汇总所有结果
-python run_experiments_step3.py --exp collect --output results_step3.json
-
-# --- 绘制论文图表 ---
-python plot_results_step3.py --results results_step3.json --output-dir figures/
-# 输出: figures/data_efficiency.png (数据效率曲线)
-#       figures/noise_robustness.png (噪声鲁棒性柱状图)
-#       figures/ablation.png (消融对比柱状图)
-#       + 终端打印 LaTeX 表格源码
-
-
-模型矩阵 (--model 选项):
-  force_mlp    — 基线A: 连续力回归 + 固定阈值判定事件 (严格传统路径)
-                  训练方式: 纯 MSE 力回归，无分类头
-                  评估方式: 预测力 → force_to_events() 阈值规则 → 离散事件
-  vision_only  — 基线B: 纯视觉事件分类
-  force_tcn    — 消融: 力觉-only TCN (去除视觉模态，event_tcn 的 vision_feat_dim=0 模式)
-  event_tcn    — 主模型: 多模态 TCN (视觉+力觉+本体)
-
-
-核心参数速查:
-  --force-noise-std  力觉高斯噪声标准差 (0.1 轻微 / 0.3 中等 / 0.5 重度)
-  --time-shift-ms    视觉-力觉时间偏移 ms (正=视觉滞后，负=视觉领先)
-  --data-fraction    训练数据比例 (0.1 / 0.5 / 1.0)
-
-
-风险预案:
-  如果 TCN 训练不稳定 → 降级为 Bi-LSTM（修改 event_tcn.py 或使用 vision_only 的 LSTM 结构）
-  如果 Event-TCN 未显著优于基线 → 改为分析原因(GT太简单、特征提取不够)，作为论文 Limitation 诚实讨论
-  force_mlp 对 stack_block 效果有限时 → 预期之中（无本体感知的力回归不能区分 Grip 和 Release），
-  反而支撑"多模态融合必要性"的论点
-
-
-Step 3 文件清单:
-| #  | 文件名                       | 核心内容                        | 关键批注点
-| -- | ------------------------- | --------------------------- | ------------------------------------------------------------
-| 1  | `run_experiments_step3.py`  | 批量实验运行脚本                    | 自动遍历 tasks×models×fractions 和 tasks×models×noise_conditions、`--dry-run` 预览模式、`--exp collect` 汇总已有结果为 JSON
-| 2  | `plot_results_step3.py`     | 实验结果绘图脚本                    | 数据效率曲线(3子图×4模型)、噪声鲁棒性柱状图(Event-TCN vs Force-MLP)、消融柱状图(vision-only/force-only/multimodal)、自动输出 LaTeX 表格
+# 9. H100 规模实验: 用独立目录 Desktop\yunfan-personal\idea\H100 (指南.md + verify_pipeline.py)
